@@ -1,0 +1,122 @@
+📘 Projet : Scraper "LBC Pépite Hunter"
+Objectif : Détecter automatiquement les véhicules sous-cotés (Pépites) en filtrant les arnaques et les véhicules à problèmes via une analyse hybride (Mathématique + IA).
+1. Stratégie de Sourcing (L'Entonnoir)
+Nous adoptons une stratégie de "Chasseur" pour capturer les annonces mal référencées.
+A. Le Filet Large (Configuration LBC)
+Ne pas utiliser le filtre "Modèle" de LeBonCoin, mais la recherche textuelle dans la catégorie Voiture.
+URL Base : Catégorie = Voitures (2) | Prix Min = 1000€ (Évite les pièces) | Énergie & Boîte fixés.
+Recherche Texte : Juste le nom du modèle (ex: "Golf").
+Année : Plage définie (ex: 2013-2020).
+B. Le Tamis (Filtrage Application)
+Ton script applique ces filtres dès la réception du HTML pour jeter les déchets.
+1.
+Blacklist (Trash) : Si titre contient : pneu, jante, location, recherche, accident, export, pour pièce. -> POUBELLE.
+2.
+Whitelist (Target) : Si titre ne contient PAS le modèle cible ou ses variantes (ex: golf 7, golf vii, golf VII) -> POUBELLE.
+2. Le Pipeline de Données (ETL)
+L'ordre des opérations est critique pour ne pas fausser les statistiques de marché.
+1.
+EXTRACT & CLEAN : Scraping, application des Black/Whitelists, normalisation des données (Km, Année, CP).
+2.
+ENRICHISSEMENT (IA/Regex) :
+Appel Gemini 1.5 Flash (Prompt : Extraction JSON des Frais, Modifs, État).
+Calcul des Coeffs de Risque (K 
+Arnaque
+​
+ , K 
+Meca
+​
+ ).
+3.
+FILTRE STATISTIQUE (Veto) :
+Si K 
+Arnaque
+​
+ <0.5 (Risque arnaque) OU Prix<Seuil 
+Aberrant
+​
+  : Exclure du calcul de cote.
+4.
+MATH (Régression) :
+Calcul de la courbe de prix du marché (Prix=f(Km,Ann 
+e
+ˊ
+ e)) uniquement sur les annonces "propres".
+Segmentation par Cluster : Modèle + Génération (déduite de l'année) + Moteur + Boite.
+5.
+SCORING FINAL : Calcul de la note pour toutes les annonces (même les douteuses).
+6.
+LOAD (BDD) : Insert New / Update Price / Mark Sold.
+3. L'Algorithme de Scoring (Le Cœur)
+Le score est une Moyenne Pondérée (Attractivité) multipliée par un Indice de Fiabilité (Réalité).
+La Formule Maîtresse
+Score_{Final} = \underbrace{((S_{Deal} \times 0.5) + (S_{Conf} \times 0.3) + (S_{Prod} \times 0.2))}_{\text{Score Base (0-100)}} \times \underbrace{(K_{Meca} \times K_{Modif} \times K_{Arnaque})}_{\text{Indice Fiabilité (0.0 - 1.0)}}
+A. Les 3 Piliers (Score Base)
+1.
+💰 Pilier Deal (50%) : Basé sur le Prix Virtuel.
+Prix Virtuel = Prix Aiché + Coûts Réparations Chiffrables (Pneus, Freins, Distrib extraits par IA).
+On compare ce Prix Virtuel à la Cote Marché.
+Score : 100/100 si -20% sous la cote. 50/100 si au prix.
+2.
+🤝 Pilier Confiance (30%) :
+Bonus : Ancienneté > 2 ans, Profil Vérifié, Longueur description, Mots clés ("Factures", "Carnet").
+Malus : Profil vide, Description < 10 mots.
+3.
+💎 Pilier Produit (20%) :
+Bonus : Finition haute (S-Line, Carat), Options (Toit ouvrant), Première main.
+B. Les Sanity Checks (Coefficients K)
+Ce sont des multiplicateurs de réduction (1.0−Malus). Ils sanctionnent le RISQUE (non chiffrable).
+1.
+K 
+Meca
+​
+  (Risque Mécanique)
+Contenu : Symptômes flous (bruit, fumée, tremblement), Pas de CT, Voyant moteur.
+Exemple : Voyant allumé = -0.30.
+2.
+K 
+Modif
+​
+  (Risque Tuning)
+Contenu : Stage 1, Reprog, Ligne directe, Kit éthanol, Rabaissement.
+Exemple : Stage 1 = -0.40.
+3.
+K 
+Arnaque
+​
+  (Risque Vendeur)
+Contenu : Arnaque détectée (Mandat cash), Incohérence Géo, Profil créé hier sans avis.
+Kill Switch : Si < 0.3, l'annonce est morte.
+4. Stack Technique & Données
+Stockage (PostgreSQL)
+Utilisation de PostgreSQL pour sa capacité hybride (SQL pour les index/régression + JSONB pour la data flexible).
+Schéma Table ads :
+id (PK), title, price, mileage, year (Colonnes SQL classiques indexées).
+cluster_key (Varchar): ex: "GOLF7_DIESEL_AUTO_150".
+raw_data (JSONB): Données brutes LBC.
+ai_analysis (JSONB): Retour complet de Gemini (Frais, Options, Risques).
+scores (JSONB): Détail des notes ( trust_score, deal_score, k_total).
+status: ACTIVE, SOLD, SCAM.
+IA (Gemini 1.5 Flash)
+Prompt : Mode JSON strict.
+Input : Titre, Prix, Km, Description.
+Output attendu :
+JSON
+{
+  "frais_chiffrables": [{"item": "pneus", "cout": 200}],
+  "risques_meca": ["voyant moteur"],
+  "modifications": ["stage 1"],
+  "options": ["toit ouvrant"]
+}
+
+5. Gestion du Cycle de Vie (Mise à jour)
+1.
+Démarrage script : Charger tous les IDs actifs en mémoire.
+2.
+Pendant le scrape :
+ID inconnu -> INSERT.
+ID connu + Prix identique -> Update last_seen.
+ID connu + Prix différent -> UPDATE prix (Historiser l'ancien) + ALERTE BAISSE PRIX.
+3.
+Fin du script :
+Les IDs en mémoire qui n'ont pas été vus dans le scrape → UPDATE status = 'SOLD'.

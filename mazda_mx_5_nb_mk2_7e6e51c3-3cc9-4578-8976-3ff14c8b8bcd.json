@@ -1,0 +1,46 @@
+{
+    "id": "7e6e51c3-3cc9-4578-8976-3ff14c8b8bcd",
+    "name": "Mazda MX-5 NB (Mk2)",
+    "active": true,
+    "created_at": "2025-12-14T01:20:16.464250",
+    "last_run_at": "2025-12-14T02:52:27.889151",
+    "lbc_params": {
+        "category": "2",
+        "text": "mx5",
+        "sort": "time",
+        "regdate": "1998-2005",
+        "price": "500-max"
+    },
+    "filters": {
+        "whitelist": [
+            "nb",
+            "mk2",
+            "nbfl",
+            "1.6",
+            "1.8",
+            "140",
+            "145",
+            "10th",
+            "eterna",
+            "phoenix"
+        ],
+        "blacklist": [
+            "na",
+            "mk1",
+            "nc",
+            "mk3",
+            "nd",
+            "mk4",
+            "pop up",
+            "miata",
+            "hardtop",
+            "jante",
+            "piece",
+            "recherche",
+            "demande",
+            "location",
+            "accident",
+            "export"
+        ]
+    }
+}

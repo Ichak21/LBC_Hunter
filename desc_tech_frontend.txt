@@ -1,0 +1,97 @@
+Architecture Globale (Layout) : L'interface doit comporter un bandeau supérieur (via streamlit-option-menu) présent sur toutes les pages pour la navigation :
+
+Home
+
+Details Searches
+
+Details Ads
+
+Searches Manager
+
+Settings
+
+Spécifications des Pages (Vue d'ensemble) :
+
+1. Page HOME (Dashboard Principal) Organisation en 3 blocs verticaux :
+
+Bloc 1 (Overview) :
+
+Une table des recherches actives (Colonnes : Nom, Liste White/Black, Année, ID, Dernier Scan). Le nom doit être cliquable et rediriger vers "Details Searches".
+
+Un PieChart à côté : Répartition des annonces par statut (ACTIVE, SCAM, SOLD).
+
+Bloc 2 (Pépites & Opportunités) :
+
+Deux tables filtrables côte à côte (Layout 2 colonnes). Style inspiré de "Movies most beloved".
+
+Contenu : Nom (lien vers "Details Ads"), Prix, Gain potentiel, Note finale, Note brute, Indice de confiance.
+
+Indice de confiance : Jauges de couleur (dégradé Rouge -> Vert).
+
+Table Gauche (Pépites Potentielles) : Filtrée sur Note finale > X (X réglable via un slider 0-100).
+
+Table Droite : Toutes les annonces considérées comme "Pépites".
+
+Bloc 3 (Logs) :
+
+Affichage pleine largeur des logs du worker en bas de page.
+
+2. Page DETAILS SEARCHES (Analyse par Recherche) Accessible via le menu ou clic depuis la Home (pré-sélectionne la recherche concernée).
+
+Header : Sélecteur de recherche (Dropdown).
+
+KPIs :
+
+PieChart : Répartition par statut pour cette recherche spécifique.
+
+Tuile (Metric) : Affichage du R² de la dernière régression marché.
+
+Graphique Central (Scatter Plot interactif) :
+
+Axe X : Kilométrage / Axe Y : Prix.
+
+Formes : Rond (Active), Croix (Sold), Carré (Scam).
+
+Couleurs (Note Finale) : Gradient 0 (Rouge foncé) -> 100 (Vert fluo). Annonces grises pour le sold, Scam en noir.
+
+Interaction : Hover affiche les détails du calcul (3 piliers + K global). Clic redirige vers "Details Ads".
+
+Tableau : Liste complète des annonces de la recherche sélectionnée.
+
+3. Page DETAILS ADS (Fiche Annonce) Accessible via les graphiques ou liens. Design détaillé et stylé.
+
+Header : ID LBC, URL LBC, Titre.
+
+AI Summary : Résumé généré par l'IA (ai_analysis).
+
+Infos Clés : Statut, Date publication, Last seen, Indicateur Favori (Icone).
+
+Détails Vendeur : Nom, Note, Nombre d'avis.
+
+Détails Véhicule : Prix, Code postal, Année, Carburant, Boîte, Puissance.
+
+Analyse Prix : Graphique historique des prix.
+
+Section Évaluation :
+
+Détail du calcul de base (3 piliers).
+
+Détail des coefficients de confiance K (avec points soulevés par l'IA).
+
+Estimation économique : Prix annonce vs Prix marché vs Coût réparation = Gain/Perte.
+
+Actions : Boutons "Favori/Unfav" et "Flag for deletion" (Exclure manuellement).
+
+4. Page SEARCHES MANAGER
+
+Liste de toutes les recherches (tous statuts).
+
+Toggle pour Activer/Désactiver une recherche.
+
+Formulaire de création de nouvelle recherche.
+
+5. Page SETTINGS
+
+Réglage fréquence de mise à jour.
+
+Configuration du SCORING_CONFIG.
