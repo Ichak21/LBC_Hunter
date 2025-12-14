@@ -3,9 +3,6 @@
 **LBC_Hunter** est une application Python d’analyse intelligente d’annonces automobiles LeBonCoin.  
 Elle combine scraping, IA et scoring métier pour détecter les bonnes affaires, estimer le prix marché et identifier les risques (arnaque, modifications, fiabilité).
 
-> ⚠️ Projet expérimental à but éducatif.  
-> Non affilié à LeBonCoin.
-
 ---
 
 ## ✨ Fonctionnalités principales
