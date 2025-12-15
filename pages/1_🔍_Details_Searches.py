@@ -14,30 +14,41 @@ render_header("Details Searches")
 # --- HANDLER DE NAVIGATION ---
 
 
-def handle_ad_click_details(df_key, selection):
-    """Gère le clic sur le tableau ou le graphique pour une annonce."""
+def request_nav(page_path: str, **state_updates):
+    """Demande une navigation. À exécuter dans le flux principal, pas dans un callback."""
+    for k, v in state_updates.items():
+        st.session_state[k] = v
+    st.session_state["_nav_target"] = page_path
+
+
+def consume_nav():
+    """Exécute la navigation demandée (si présente) puis nettoie."""
+    target = st.session_state.pop("_nav_target", None)
+    if target:
+        st.switch_page(target)
+
+
+def handle_ad_click_details(df_key: str, selection: dict | None):
+    """Prépare la navigation vers Details Ads (sans switch_page dans le callback)."""
     selected_ad_id = None
 
-    # 1. Clic sur le Scatter Plot (selection_mode='points')
-    if selection and "points" in selection and selection["points"]:
-        # Plotly retourne l'index du point
+    # 1) Clic Plotly
+    if selection and selection.get("points"):
         point_index = selection["points"][0]["pointIndex"]
         selected_ad_id = st.session_state[df_key].iloc[point_index]["ID"]
 
-    # 2. Clic sur le Tableau (selection_mode='rows')
-    elif selection and "rows" in selection and selection["rows"]:
+    # 2) Clic Table
+    elif selection and selection.get("rows"):
         idx = selection["rows"][0]
         selected_ad_id = st.session_state[df_key].iloc[idx]["ID"]
 
     if selected_ad_id:
-        st.session_state["selected_ad_id"] = selected_ad_id
-        st.switch_page("pages/2_📄_Details_Ads.py")
+        request_nav("pages/2_📄_Details_Ads.py", selected_ad_id=selected_ad_id)
 
 
 # =============================================================================
 # 1. SÉLECTION DE LA RECHERCHE
 # =============================================================================
-
 searches_list = SearchManager.list_searches()
 search_options = {s["name"]: s["id"] for s in searches_list}
 search_names = list(search_options.keys())
@@ -265,14 +276,23 @@ def get_styled_dataframe_details(df_in):
     return styler
 
 
-# Affichage de la table avec gestion du clic
+df_sorted = df_ads.sort_values(
+    by="Score Final", ascending=False).reset_index(drop=True)
+st.session_state["df_details_search_sorted"] = df_sorted
+
+TABLE_KEY = "details_ads_table"
+
 st.dataframe(
-    get_styled_dataframe_details(df_ads.sort_values(
-        by="Score Final", ascending=False)),
+    get_styled_dataframe_details(df_sorted),
     column_config=ads_column_config,
     use_container_width=True,
     hide_index=True,
     selection_mode="single-row",
-    on_select=lambda selection: handle_ad_click_details(
-        "df_details_search", selection)
+    key=TABLE_KEY,
+    on_select=lambda: handle_ad_click_details(
+        "df_details_search_sorted",
+        st.session_state[TABLE_KEY].selection
+    ),
 )
+
+consume_nav()

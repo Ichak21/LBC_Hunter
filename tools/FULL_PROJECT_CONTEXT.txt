@@ -1,0 +1,3951 @@
+# CONTEXTE COMPLET DU PROJET
+# NOTE A L'IA: Voici la structure du projet suivie du contenu des fichiers.
+
+==================================================
+PROJECT STRUCTURE:
+.
+│   ├── dashboard.py
+│   ├── main.py
+│   ├── core/
+│   │   ├── ai_analyst.py
+│   │   ├── app_config.py
+│   │   ├── config.py
+│   │   ├── db_client.py
+│   │   ├── logging_config.py
+│   │   ├── models.py
+│   │   ├── price_engine.py
+│   │   ├── rescan_service.py
+│   │   ├── scoring_config.py
+│   │   ├── scraper.py
+│   │   ├── search_manager.py
+│   │   ├── __init__.py
+│   ├── docs/
+│   │   ├── whitepaper_traceability.md
+│   ├── frontend/
+│   │   ├── data_loader.py
+│   │   ├── layout.py
+│   │   ├── __init__.py
+│   ├── logs/
+│   ├── pages/
+│   │   ├── 1_🔍_Details_Searches.py
+│   │   ├── 2_📄_Details_Ads.py
+│   │   ├── 3_🎛️_Searches_Manager.py
+│   │   ├── 4_⚙️_Settings.py
+│   ├── searches/
+│   │   ├── ford_focus_rs_mk2_d59147d7-669e-4e8c-9bfc-c461c18beb4a.json
+│   ├── tools/
+│   │   ├── simulate_k.py
+│   │   ├── verify_contract.py
+│   │   ├── _bootstrap.py
+│   │   ├── __init__.py
+==================================================
+
+
+==================================================
+FILE_PATH: dashboard.py
+==================================================
+import streamlit as st
+import pandas as pd
+import os
+import plotly.express as px
+from frontend.layout import render_header
+from frontend.data_loader import load_home_data, load_logs
+
+# 0. CONFIG & HEADER
+st.set_page_config(page_title="LBC Hunter - Home",
+                   page_icon="🦅", layout="wide")
+render_header("Home")
+
+# Chargement données
+status_counts, df_ads, df_searches = load_home_data()
+
+st.title("🦅 Dashboard")
+
+
+def request_nav(page_path: str, **state_updates):
+    """Demande une navigation. À exécuter dans le flux principal, pas dans un callback."""
+    for k, v in state_updates.items():
+        st.session_state[k] = v
+    st.session_state["_nav_target"] = page_path
+
+
+def consume_nav():
+    """Exécute la navigation demandée (si présente) puis nettoie."""
+    target = st.session_state.pop("_nav_target", None)
+    if target:
+        st.switch_page(target)
+
+
+def handle_search_selection():
+    sel = st.session_state["search_table"].selection
+    rows = sel.get("rows", [])
+    if rows:
+        idx = rows[0]
+        selected_id = st.session_state["df_searches"].iloc[idx]["id"]
+        request_nav("pages/1_🔍_Details_Searches.py",
+                    selected_search_id=selected_id)
+
+
+def handle_ad_selection(df_key, table_key):
+    sel = st.session_state[table_key].selection
+    rows = sel.get("rows", [])
+    if rows:
+        idx = rows[0]
+        selected_id = st.session_state[df_key].iloc[idx]["ID"]
+        request_nav("pages/2_📄_Details_Ads.py", selected_ad_id=selected_id)
+
+
+# On stocke les DataFrames de base en Session State pour les handlers
+if not df_searches.empty:
+    st.session_state["df_searches"] = df_searches
+
+
+# =============================================================================
+# BLOC 1 : RECHERCHES
+# =============================================================================
+c1, c2 = st.columns([2, 1])
+
+with c1:
+    st.subheader("📡 Recherches Actives")
+    if not df_searches.empty:
+        st.dataframe(
+            df_searches,
+            column_config={
+                "name": st.column_config.TextColumn("Nom", width="medium"),
+                "Année": st.column_config.TextColumn("Année", width="small"),
+                "Whitelist": st.column_config.TextColumn("White", width="small"),
+                "Blacklist": st.column_config.TextColumn("Black", width="small"),
+                "last_run_at": st.column_config.DatetimeColumn("Dernier Scan", format="DD/MM HH:mm", width="small"),
+                "id": st.column_config.TextColumn("ID", width="small")
+            },
+            use_container_width=True,
+            hide_index=True,
+            selection_mode="single-row",
+            key="search_table",
+            on_select=handle_search_selection
+        )
+    else:
+        st.info("Aucune recherche.")
+
+with c2:
+    st.subheader("📊 Parc Global")
+    if status_counts:
+        df_status = pd.DataFrame(
+            list(status_counts.items()), columns=["Statut", "Count"])
+        fig = px.pie(df_status, values='Count', names='Statut', hole=0.5,
+                     color='Statut',
+                     color_discrete_map={'ACTIVE': '#4CAF50',
+                                         'SOLD': '#9E9E9E', 'SCAM': '#F44336'})
+        fig.update_layout(
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom",
+                        y=-0.2, xanchor="center", x=0.5),
+            margin=dict(t=0, b=20, l=0, r=0),
+            height=200
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+st.divider()
+
+# =============================================================================
+# BLOC 2 : PÉPITES & FAVORIS
+# =============================================================================
+st.subheader("💰 Opportunités")
+
+col_left, col_right = st.columns(2)
+
+# FONCTION DE STYLE HYBRIDE
+
+
+def get_styled_dataframe(df_in):
+    if df_in.empty:
+        return df_in
+
+    df_view = df_in[["ID", "Titre", "Prix", "Gain",
+                     "Note Brute", "Indice K", "Favori", "URL"]]
+
+    styler = df_view.style.format({
+        "Prix": "{:.0f} €",
+        "Gain": "{:+.0f} €"
+    }).map(
+        lambda v: f'color: {"#4CAF50" if v > 0 else "#F44336"}; font-weight: bold;',
+        subset=['Gain']
+    )
+    return styler
+
+
+# CONFIGURATION DES COLONNES
+common_config = {
+    "Titre": st.column_config.TextColumn("Annonce", width="medium"),
+    "Gain": st.column_config.TextColumn("Gain/Perte", width="small"),
+
+    "Note Brute": st.column_config.ProgressColumn(
+        "Note Brute", format="%d", min_value=0, max_value=100, width="small", color="#4CAF50"
+    ),
+    "Indice K": st.column_config.ProgressColumn(
+        "Indice K", format="%d%%", min_value=0, max_value=100, width="small", color="#2196F3"
+    ),
+    "ID": None, "Favori": None, "URL": None
+}
+
+# --- TABLE GAUCHE ---
+with col_left:
+    min_score = st.slider("Note Brute Min.", 0, 100,
+                          50, label_visibility="collapsed", key="score_slider")
+    st.markdown(f"**🎯 Pépites (Note Brute > {min_score})**")
+
+    if not df_ads.empty:
+        df_pepites = df_ads[df_ads["Note Brute"] >=
+                            min_score].sort_values(by="Note Brute", ascending=False)
+        # Stockage pour le handler
+        st.session_state["df_pepites"] = df_pepites
+
+        st.dataframe(
+            get_styled_dataframe(df_pepites),
+            column_config=common_config,
+            use_container_width=True,
+            hide_index=True,
+            height=400,
+            selection_mode="single-row",
+            key="pepites_table",
+            on_select=lambda: handle_ad_selection(
+                "df_pepites", "pepites_table")
+        )
+    else:
+        st.info("Aucune pépite.")
+
+# --- TABLE DROITE ---
+with col_right:
+    st.markdown("**❤️ Mes Favoris**")
+
+    if not df_ads.empty:
+        df_fav = df_ads[df_ads["Favori"] == True].sort_values(
+            by="Note Brute", ascending=False)
+        # Stockage pour le handler
+        st.session_state["df_fav"] = df_fav
+
+        if not df_fav.empty:
+            st.dataframe(
+                get_styled_dataframe(df_fav),
+                column_config=common_config,
+                use_container_width=True,
+                hide_index=True,
+                height=400,
+                selection_mode="single-row",
+                key="fav_table",
+                on_select=lambda: handle_ad_selection("df_fav", "fav_table")
+            )
+        else:
+            st.info("Aucun favori.")
+    else:
+        st.info("Base vide.")
+
+st.divider()
+
+# =============================================================================
+# BLOC 3 : LOGS
+# =============================================================================
+st.subheader("📟 Logs Worker")
+logs_content = load_logs(lines=200)
+st.markdown(f"""
+<div style="
+    height: 600px; width: 100%; overflow-y: scroll; 
+    background-color: #0e1117; color: #c9d1d9; 
+    padding: 15px; border: 1px solid #30333d; border-radius: 5px; 
+    font-family: 'Consolas', monospace; font-size: 12px; line-height: 1.5;
+    white-space: pre-wrap;">{logs_content}</div>
+""", unsafe_allow_html=True)
+st.write("")
+st.write("")
+
+# =============================================================================
+# BLOC 4 : consume la navigation demandée
+# =============================================================================
+consume_nav()
+
+
+==================================================
+FILE_PATH: main.py
+==================================================
+from core.search_manager import SearchManager
+from core.scraper import LBCScraper
+from core.db_client import DatabaseClient
+from core.ai_analyst import AIAnalyst, AIConfigError
+from core.price_engine import PriceEngine
+from datetime import datetime
+import time
+import sys
+import os
+import logging
+from core.logging_config import setup_logging
+from core.app_config import load_app_config
+
+setup_logging(level=logging.INFO)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("google").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
+
+
+def initialize_default_search():
+    searches = SearchManager.list_searches()
+    for searche in searches:
+        logger.info(f"🔍 {searche['id']}-{searche['name']}")
+
+
+def run_bot():
+    logger.info("🚀 --- LBC HUNTER ---")
+    cfg = load_app_config()
+
+    try:
+        db = DatabaseClient()
+        analyst = AIAnalyst()
+        price_engine = PriceEngine(db)
+    except AIConfigError as e:
+        logger.error("🛑 IA non utilisable: %s", e)
+        return
+    except Exception as e:
+        logger.exception("🛑 Erreur Init worker: %s", e)
+        return
+
+    # Init
+    initialize_default_search()
+    tasks = SearchManager.list_searches(only_active=True)
+
+    for task in tasks:
+        logger.info(f"\n🔎 Traitement : {task['name']}")
+
+        # 1. SCRAPE LISTE
+        html = LBCScraper.fetch_html(task['lbc_params'])
+        raw_data = LBCScraper.parse_data(html)
+        if not raw_data:
+            continue
+
+        # 2. FILTER & TRANSFORM
+        clean_ads = LBCScraper.process_ads(
+            raw_data, task['filters']['whitelist'], task['filters']['blacklist'])
+
+        # 3. ENRICHISSEMENT INTELLIGENT
+        ads_to_save = []
+
+        if clean_ads:
+            logger.info(
+                f"   🎯 {len(clean_ads)} annonces détectées. Vérification du cache...")
+
+            for ad in clean_ads:
+                # Cache Check
+                already_analyzed = db.is_ad_analyzed(ad['id'])
+
+                if already_analyzed:
+                    logger.info(
+                        f"      👻 Connue (Skip IA) : {ad['title'][:20]}...")
+                    ads_to_save.append(ad)
+                    continue
+
+                # Deep Scraping
+                full_desc = LBCScraper.get_ad_description(ad['url'])
+                if full_desc:
+                    ad['description'] = full_desc
+                else:
+                    logger.info(
+                        f"      ⚠️ Pas de description pour {ad['title']}")
+
+                # Analyse Gemini
+                logger.info(
+                    f"      🧠 NOUVEAU -> Analyse IA : {ad['title'][:20]}...")
+                ai_result = analyst.analyze_ad(ad)
+                time.sleep(cfg.worker.gemini_sleep_seconds)
+
+                if ai_result:
+                    ad.update(ai_result)
+                    if ai_result["scores"]["sanity_checks"]["k_arnaque"] < 0.3:
+                        logger.info("         💀 SCAM DÉTECTÉ !")
+
+                ads_to_save.append(ad)
+
+        # 4. SAVE (Sauvegarde des nouvelles données)
+        if ads_to_save:
+            db.upsert_ads(ads_to_save, search_id=task['id'])
+            SearchManager.update_last_run(task['id'])
+
+        # 5. MARKET ANALYSIS (Le Sprint 4 !)
+        # Une fois qu'on a toutes les données à jour, on lance les maths
+        logger.info(f"   📐 Calcul de la cote marché (Random Forest)...")
+        price_engine.update_deal_scores(task['id'])
+
+    # 6. NETTOYAGE (Une fois que toutes les recherches sont finies)
+    # On vérifie les annonces qu'on n'a pas vues depuis 3 jours (par exemple)
+    logger.info("\n🧹 Vérification des annonces disparues...")
+    db.archive_old_ads(days_threshold=cfg.worker.archive_days_threshold)
+
+    logger.info("\n✅ Job terminé.")
+
+
+if __name__ == "__main__":
+    run_bot()
+
+==================================================
+FILE_PATH: core\ai_analyst.py
+==================================================
+import os
+import json
+import logging
+from typing import Any, Optional
+import google.generativeai as genai
+from dotenv import load_dotenv
+from .scoring_config import SCORING_CONFIG
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_GENERATION_CONFIG = {
+    "temperature": 0.0,
+    "top_p": 0.95,
+    "max_output_tokens": 8192,
+    "response_mime_type": "application/json",
+}
+
+
+class AIConfigError(RuntimeError):
+    """Erreur de configuration IA (ex: clé manquante)."""
+
+
+class AIResponseError(RuntimeError):
+    """Erreur de réponse IA (JSON invalide / structure inattendue)."""
+
+
+class AIAnalyst:
+    def __init__(
+        self,
+        model_name: str = "gemini-2.0-flash",
+        generation_config: Optional[dict[str, Any]] = None,
+        env_file: bool = True,
+    ):
+        # Chargement .env optionnel (pratique en dev, neutre en prod si env vars déjà set)
+        if env_file:
+            load_dotenv()
+
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise AIConfigError(
+                "Clé GEMINI_API_KEY introuvable. Configure-la via variables d’environnement (.env en dev)."
+            )
+
+        genai.configure(api_key=api_key)
+
+        self.model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config=generation_config or DEFAULT_GENERATION_CONFIG,
+            system_instruction=(
+                "Tu es un expert automobile senior. "
+                "Tu analyses des annonces pour en extraire la valeur réelle et les risques. "
+                "Utilise les données déclarées (champs JSON) ET le texte pour te faire un avis."
+            ),
+        )
+
+    def analyze_ad(self, ad_data: dict) -> Optional[dict]:
+        """
+        Retourne un dict {ai_analysis, scores} ou None si erreur non récupérable.
+        """
+        description = ad_data.get("description") or ad_data.get("raw_attributes", {}).get(
+            "description_text", "Pas de description"
+        )
+
+        prompt = f"""
+ANALYSE CETTE ANNONCE :
+
+--- INFOS GÉNÉRALES ---
+Véhicule : {ad_data.get('title')}
+Prix : {ad_data.get('price')} €
+Année : {ad_data.get('year')} | Km : {ad_data.get('km')}
+
+--- INFOS VENDEUR & TECHNIQUE (Déclarées) ---
+Finition déclarée : {ad_data.get('finition', 'N/A')}
+Boîte : {ad_data.get('gearbox', 'N/A')}
+Note Vendeur : {ad_data.get('seller_rating', 'N/A')} (sur 1.0) - {ad_data.get('seller_rating_count', 0)} avis
+
+--- DESCRIPTION TEXTUELLE ---
+\"{description}\"
+
+--- TA MISSION ---
+- IMPORTANT : Les champs "severity" doivent être compris entre 0.0 et 1.0, et refléter la gravité réelle.
+
+- IMPORTANT: Pour "risques_meca[].severity" (0.0 à 1.0), utilise cette grille:
+  * 0.05-0.15: mineur / entretien courant (petite fuite, pneus à prévoir, consommable)
+  * 0.20-0.40: défaut notable mais généralement gérable (freins, suspension fatiguée, capteur, petite fuite)
+  * 0.50-0.70: risque important / réparation coûteuse possible (embrayage, distribution incertaine, turbo, injecteurs)
+  * 0.80-1.00: critique / danger sécurité ou panne probable (moteur HS, boîte HS, surchauffe, défaut freinage majeur)
+
+- IMPORTANT: Pour "modifications[].severity" (0.0 à 1.0), utilise cette grille:
+  * 0.05-0.15: esthétique/réversible (jantes, sono, teinte ...)
+  * 0.20-0.40: modif légère (admission/échappement discret, ressorts ...)
+  * 0.50-0.70: performance (stage 1, downpipe, reprog, filtre sport ...)
+  * 0.80-1.00: modif lourde / risque légal/fiabilité (stage 2+, swap, suppression systèmes ...)
+
+- IMPORTANT: Pour "indices_arnaque[].severity" (0.0 à 1.0), utilise cette grille:
+  * 0.05-0.15: petit doute / incohérence légère (description très vague, manque d’infos, prix un peu bas sans preuve)
+  * 0.20-0.40: suspect (prix anormalement bas, vendeur évasif, incohérences, urgence/bizarreries)
+  * 0.50-0.70: très suspect (paiement inhabituel, demande d’acompte, histoire incohérente, documents flous)
+  * 0.80-1.00: quasi certain / pattern classique d’arnaque (mandat cash, escrow louche, hors plateforme, “je suis à l’étranger”, usurpation)
+
+RÉPONDS UNIQUEMENT EN JSON STRICT :
+{{
+  "ai_analysis": {{
+    "summary": "Résumé expert en 1 phrase",
+    "frais_chiffrables": [{{ "item": "ex: Pneus", "cout": 200, "raison": "Usure signalée" }}],
+    "risques_meca": [{{ "nom": "ex: Bruit moteur", "severity": 0.0 }}],
+    "modifications": [{{ "nom": "ex: Stage 1", "severity": 0.0 }}],
+    "indices_arnaque": [{{ "nom": "ex: Mandat Cash", "severity": 0.0 }}],
+    "confiance": {{
+      "points_positifs": ["liste EXACTE parmi: premiere_main, carnet_entretien, factures, suivi_garage, vendeur_pro, garantie, ct_ok"],
+      "points_negatifs": ["liste EXACTE parmi: orthographe_deplorable, ton_agressif, description_vague, cause_depart_suspecte"]
+    }},
+    "produit_evaluation": {{
+      "finition_detectee": "Nom de la finition réelle (ex: S-Line) ou 'Standard'",
+      "note_equipement_sur_10": 5,
+      "options_majeures": ["Liste 3-4 options clés"]
+    }}
+  }}
+}}
+"""
+
+        try:
+            response = self.model.generate_content(prompt)
+            raw = getattr(response, "text", None)
+            if not raw:
+                raise AIResponseError(
+                    "Réponse IA vide (response.text manquant).")
+
+            data = self._safe_json_loads(raw)
+            self._validate_minimal_schema(data)
+
+            return self._calculate_score(data, ad_data)
+
+        except Exception as e:
+            # Pas de print : logs exploitables
+            logger.exception("Erreur analyse IA (ad_id=%s): %s",
+                             ad_data.get("id"), e)
+            return None
+
+    @staticmethod
+    def _safe_json_loads(text: str) -> dict:
+        """
+        Tente de parser du JSON strict. Si l’IA entoure de ```json ... ```,
+        on nettoie proprement.
+        """
+        cleaned = text.strip()
+
+        # Nettoyage léger si l’IA renvoie un bloc markdown
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            cleaned = cleaned.replace("json", "", 1).strip()
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            raise AIResponseError(f"JSON invalide: {e}") from e
+
+    @staticmethod
+    def _validate_minimal_schema(payload: dict) -> None:
+        if not isinstance(payload, dict) or "ai_analysis" not in payload:
+            raise AIResponseError(
+                "Schéma invalide: clé 'ai_analysis' manquante.")
+        if not isinstance(payload["ai_analysis"], dict):
+            raise AIResponseError(
+                "Schéma invalide: 'ai_analysis' n’est pas un objet.")
+
+    def _calculate_score(self, gemini_data: dict, ad_data: dict) -> dict:
+        analysis = gemini_data.get("ai_analysis", {})
+        conf_cfg = SCORING_CONFIG["confiance"]
+        base_scores = SCORING_CONFIG["base_scores"]
+
+        def safe_float(val):
+            try:
+                return float(val) if val is not None else 0.0
+            except Exception:
+                return 0.0
+
+        def safe_int(val):
+            try:
+                return int(val) if val is not None else 0
+            except Exception:
+                return 0
+
+        def clamp01(x: float) -> float:
+            return max(0.0, min(1.0, x))
+
+        def clamp(x: float, lo: float, hi: float) -> float:
+            return max(lo, min(hi, x))
+
+        def aggregate_k(items: list[dict], cfg: dict) -> float:
+            alpha = float(cfg.get("alpha", 0.7))
+            sum_cap = float(cfg.get("sum_cap", 0.6))
+            hard_threshold = cfg.get("hard_threshold", None)
+            k_min_soft = float(cfg.get("k_min", 0.7))
+            k_min_hard = float(cfg.get("k_min_hard", k_min_soft))
+
+            sevs = [clamp01(safe_float(i.get("severity")))
+                    for i in (items or [])]
+            if not sevs:
+                return 1.0
+
+            s_max = max(sevs)
+            s_sum = min(sum(sevs), sum_cap)
+
+            penalty = (alpha * s_max) + ((1.0 - alpha) * s_sum)
+            k = 1.0 - penalty
+            k_min = k_min_soft
+            if hard_threshold is not None and s_max >= float(hard_threshold):
+                k_min = k_min_hard
+
+            return clamp(k, k_min, 1.0)
+            return clamp(k, k_min, 1.0)
+        # --- B. CALCUL FIABILITÉ (K) ---
+        sev_cfg = SCORING_CONFIG.get("severity", {})
+
+        k_meca = aggregate_k(analysis.get(
+            "risques_meca", []), sev_cfg.get("meca", {}))
+        k_modif = aggregate_k(analysis.get(
+            "modifications", []), sev_cfg.get("modif", {}))
+        k_arnaque = aggregate_k(analysis.get(
+            "indices_arnaque", []), sev_cfg.get("arnaque", {}))
+
+        # --- C. PRIX VIRTUEL (S_DEAL) ---
+        prix_affiche = safe_int(ad_data.get("price"))
+        cout_repa = sum((item.get("cout") or 0)
+                        for item in analysis.get("frais_chiffrables", []))
+        prix_virtuel = prix_affiche + cout_repa
+        s_deal = base_scores["deal"]
+
+        # --- D. CONFIANCE (S_CONF) ---
+        s_conf = base_scores["conf"]
+
+        for tag in analysis.get("confiance", {}).get("points_positifs", []):
+            val = conf_cfg["bonus_tags"].get(
+                tag, conf_cfg["default_bonus_val"])
+            s_conf += val
+
+        for tag in analysis.get("confiance", {}).get("points_negatifs", []):
+            val = conf_cfg["malus_tags"].get(
+                tag, conf_cfg["default_malus_val"])
+            s_conf += val
+
+        rating = ad_data.get("seller_rating")
+        count = ad_data.get("seller_rating_count", 0)
+
+        if rating is not None and count >= conf_cfg["seller"]["min_reviews"]:
+            if rating >= conf_cfg["seller"]["top_threshold"]:
+                s_conf += conf_cfg["seller"]["bonus_val"]
+            elif rating < conf_cfg["seller"]["bad_threshold"]:
+                s_conf += conf_cfg["seller"]["malus_val"]
+
+        desc_len = len((ad_data.get("description") or "").split())
+        if desc_len < conf_cfg["description"]["short_len"]:
+            s_conf += conf_cfg["description"]["short_pen"]
+        elif desc_len > conf_cfg["description"]["long_len"]:
+            s_conf += conf_cfg["description"]["long_bon"]
+
+        s_conf = max(0, min(100, s_conf))
+
+        # --- E. PRODUIT (S_PROD) ---
+        note_expert = analysis.get("produit_evaluation", {}).get(
+            "note_equipement_sur_10", 5)
+        s_prod = safe_float(note_expert) * 10
+        s_prod = max(0, min(100, s_prod))
+
+        # --- F. SCORE FINAL ---
+        weights = SCORING_CONFIG["weights"]
+        score_base = (s_deal * weights["deal"]) + (s_conf *
+                                                   weights["conf"]) + (s_prod * weights["prod"])
+
+        indice_fiabilite = k_meca * k_modif * k_arnaque
+        score_final = score_base * indice_fiabilite
+
+        return {
+            "ai_analysis": analysis,
+            "scores": {
+                "total": round(score_final, 1),
+                "base": {"deal": s_deal, "conf": s_conf, "prod": s_prod},
+                "sanity_checks": {
+                    "k_meca": round(k_meca, 2),
+                    "k_modif": round(k_modif, 2),
+                    "k_arnaque": round(k_arnaque, 2),
+                },
+                "financial": {
+                    "posted_price": int(prix_affiche),
+                    "repair_cost": int(cout_repa),
+                    "virtual_price": int(prix_virtuel),
+                },
+            },
+        }
+
+
+==================================================
+FILE_PATH: core\app_config.py
+==================================================
+# core/app_config.py
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from dotenv import load_dotenv
+from dataclasses import dataclass
+from pathlib import Path
+
+load_dotenv()
+
+
+@dataclass(frozen=True)
+class DatabaseConfig:
+    url: str
+
+
+@dataclass(frozen=True)
+class ScraperConfig:
+    min_sleep_seconds: float
+    max_sleep_seconds: float
+    request_timeout_seconds: float
+    ad_page_min_sleep_seconds: float
+    ad_page_max_sleep_seconds: float
+
+
+@dataclass(frozen=True)
+class WorkerConfig:
+    gemini_sleep_seconds: float
+    archive_days_threshold: int
+
+
+@dataclass(frozen=True)
+class PathsConfig:
+    logs_dir: Path
+    worker_log_file: Path
+    searches_dir: Path
+
+
+@dataclass(frozen=True)
+class StreamlitConfig:
+    cache_ttl_seconds: int
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    db: DatabaseConfig
+    scraper: ScraperConfig
+    worker: WorkerConfig
+    streamlit: StreamlitConfig
+    paths: PathsConfig
+
+
+def load_app_config() -> AppConfig:
+    base_dir = Path(os.getenv("APP_BASE_DIR", ".")).resolve()
+    db_url = (
+        os.getenv("DATABASE_URL")
+        or os.getenv("DB_URL")
+        or "postgresql://lbc_user:lbc_password@localhost:5432/lbc_data"
+    )
+
+    scraper = ScraperConfig(
+        min_sleep_seconds=float(os.getenv("SCRAPER_MIN_SLEEP", "2.5")),
+        max_sleep_seconds=float(os.getenv("SCRAPER_MAX_SLEEP", "5.0")),
+        request_timeout_seconds=float(os.getenv("SCRAPER_TIMEOUT", "10")),
+        ad_page_min_sleep_seconds=float(
+            os.getenv("SCRAPER_AD_MIN_SLEEP", "1.0")),
+        ad_page_max_sleep_seconds=float(
+            os.getenv("SCRAPER_AD_MAX_SLEEP", "2.0")),
+    )
+
+    worker = WorkerConfig(
+        gemini_sleep_seconds=float(os.getenv("WORKER_GEMINI_SLEEP", "5")),
+        archive_days_threshold=int(os.getenv("WORKER_ARCHIVE_DAYS", "3")),
+    )
+
+    streamlit = StreamlitConfig(
+        cache_ttl_seconds=int(os.getenv("STREAMLIT_CACHE_TTL", "10")),
+    )
+
+    paths = PathsConfig(
+        logs_dir=Path(os.getenv("LOGS_DIR", str(base_dir / "logs"))),
+        worker_log_file=Path(
+            os.getenv("WORKER_LOG_FILE", str(base_dir / "logs" / "worker.log"))),
+        searches_dir=Path(
+            os.getenv("SEARCHES_DIR", str(base_dir / "searches"))),
+    )
+
+    return AppConfig(
+        db=DatabaseConfig(url=db_url),
+        scraper=scraper,
+        worker=worker,
+        streamlit=streamlit,
+        paths=paths,
+    )
+
+
+==================================================
+FILE_PATH: core\config.py
+==================================================
+import random
+
+# URLs Cibles
+LBC_BASE_URL = "https://www.leboncoin.fr/recherche"
+
+# Délais (Pour rendre les pauses humaines configurables)
+MIN_SLEEP = 2.5
+MAX_SLEEP = 5.0
+TIMEOUT = 10
+
+# Liste de User-Agents (Pour la rotation)
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+]
+
+
+def get_random_headers():
+    """Génère des headers avec un User-Agent aléatoire"""
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Referer": "https://www.google.com/",
+        "Connection": "keep-alive",
+    }
+
+
+==================================================
+FILE_PATH: core\db_client.py
+==================================================
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from typing import Any, Dict, List, Optional
+from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy import and_
+from .models import Base, Ad
+from datetime import datetime, timedelta
+import requests
+from . import config
+from .app_config import load_app_config
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class DatabaseClient:
+    def __init__(self, db_url: str | None = None):
+        if db_url is None:
+            db_url = load_app_config().db.url
+        logger.info(f"🔌 Tentative de connexion à {db_url}...")
+        try:
+            self.engine = create_engine(db_url)
+            Base.metadata.create_all(self.engine)
+            self.Session = sessionmaker(bind=self.engine)
+            logger.info("✅ Connecté à PostgreSQL et tables synchronisées.")
+        except Exception as e:
+            logger.exception(f"❌ ÉCHEC de connexion : {e}")
+            raise e
+
+    def upsert_ads(self, ads_data_list: list, search_id: str):
+        session = self.Session()
+        stats = {"new": 0, "updated": 0, "unchanged": 0}
+
+        try:
+            for ad_dict in ads_data_list:
+                ad_id = ad_dict["id"]
+                current_price = int(ad_dict["price"])
+
+                existing_ad = session.query(Ad).filter_by(id=ad_id).first()
+
+                if existing_ad:
+                    # --- UPDATE ---
+                    existing_ad.last_seen_at = datetime.now()
+                    if existing_ad.status == "SOLD":
+                        existing_ad.status = "ACTIVE"
+
+                    # Update Found By
+                    current_searches = list(
+                        existing_ad.found_by_searches) if existing_ad.found_by_searches else []
+                    if search_id not in current_searches:
+                        current_searches.append(search_id)
+                        existing_ad.found_by_searches = current_searches
+
+                    # Update Price
+                    if existing_ad.price != current_price:
+                        history = list(
+                            existing_ad.price_history) if existing_ad.price_history else []
+                        history.append(
+                            {"date": datetime.now().isoformat(), "price": existing_ad.price})
+                        existing_ad.price_history = history
+                        existing_ad.price = current_price
+                        stats["updated"] += 1
+                    else:
+                        stats["unchanged"] += 1
+
+                    # Update Intelligence if present
+                    if "ai_analysis" in ad_dict:
+                        existing_ad.ai_analysis = ad_dict["ai_analysis"]
+                    if "scores" in ad_dict:
+                        existing_ad.scores = ad_dict["scores"]
+
+                else:
+                    # --- INSERT (Avec les nouveaux champs) ---
+                    new_ad = Ad(
+                        id=ad_id,
+                        found_by_searches=[search_id],
+                        title=ad_dict["title"],
+                        description=ad_dict.get("description"),  # <--- ICI
+                        url=ad_dict["url"],
+                        price=current_price,
+                        mileage=self._safe_int(ad_dict.get("km")),
+                        year=self._safe_int(ad_dict.get("year")),
+                        fuel=ad_dict.get("fuel"),
+                        gearbox=ad_dict.get("gearbox"),        # <--- ICI
+                        horsepower=ad_dict.get("horsepower"),  # <--- ICI
+                        finition=ad_dict.get("finition"),      # <--- ICI
+
+                        location=ad_dict.get("location"),
+                        zipcode=ad_dict.get("zipcode"),        # <--- ICI
+
+                        seller_rating=ad_dict.get(
+                            "seller_rating"),             # <--- ICI
+                        seller_rating_count=ad_dict.get(
+                            "seller_rating_count"),  # <--- ICI
+
+                        publication_date=self._parse_date(ad_dict.get("date")),
+                        raw_data=ad_dict.get("raw_attributes"),
+                        price_history=[],
+                        status="ACTIVE",
+                        ai_analysis=ad_dict.get("ai_analysis"),
+                        scores=ad_dict.get("scores")
+                    )
+                    session.add(new_ad)
+                    stats["new"] += 1
+
+            session.commit()
+            logger.info(
+                f"📊 BDD: {stats['new']} news | {stats['updated']} maj.")
+
+        except Exception as e:
+            session.rollback()
+            logger.exception(f"❌ Erreur DB : {e}")
+        finally:
+            session.close()
+
+    def archive_old_ads(self, days_threshold: int):
+        """
+        Vérifie les annonces qu'on n'a pas revues depuis X jours.
+        PING l'URL pour voir si elle est encore en ligne.
+        Si 404/Gone -> SOLD.
+        Si 200 OK -> On met à jour la date (elle est juste passée en page 2+).
+        """
+        session = self.Session()
+        try:
+            limit_date = datetime.now() - timedelta(days=days_threshold)
+
+            # On récupère les candidates à l'archivage
+            ads_to_check = session.query(Ad).filter(
+                Ad.status == "ACTIVE",
+                Ad.last_seen_at < limit_date
+            ).all()
+
+            if not ads_to_check:
+                logger.info("🧹 Ménage : Aucune annonce à vérifier.")
+                return
+
+            logger.info(
+                f"🧹 Ménage : {len(ads_to_check)} annonces anciennes à vérifier (Ping URL)...")
+            archived_count = 0
+            rescued_count = 0
+
+            for ad in ads_to_check:
+                try:
+                    # On tente d'accéder à la page (HEAD request est plus léger que GET)
+                    # On utilise les headers pour ne pas se faire jeter
+                    headers = config.get_random_headers()
+                    r = requests.head(ad.url, headers=headers,
+                                      timeout=5, allow_redirects=True)
+
+                    # Leboncoin redirige souvent vers la home ou une page de recherche si l'annonce est off
+                    # Si l'URL finale n'est pas l'URL de l'annonce, c'est suspect.
+
+                    if r.status_code == 200:
+                        # ATTENTION : Parfois LBC renvoie 200 même si supprimé (page "Cette annonce est désactivée")
+                        # Pour être sûr à 100%, il faudrait faire un GET et chercher "Cette annonce est désactivée".
+                        # Mais pour l'instant, faisons confiance au status code ou à la redirection.
+
+                        # Si c'est toujours bon, on la "sauve"
+                        # print(f"   ⛑️  Sauvetage : {ad.title[:20]} est toujours en ligne (Page 2+).")
+                        ad.last_seen_at = datetime.now()
+                        rescued_count += 1
+                    else:
+                        # 404, 410, ou autre erreur -> C'est fini
+                        logger.info(
+                            f"   👻 Disparue ({r.status_code}) : {ad.title[:20]} -> SOLD")
+                        ad.status = "SOLD"
+                        archived_count += 1
+
+                except Exception:
+                    # En cas d'erreur technique (timeout), dans le doute, on garde.
+                    pass
+
+            session.commit()
+            logger.info(
+                f"✅ Ménage terminé : {archived_count} archivées | {rescued_count} sauvées (toujours actives).")
+
+        except Exception as e:
+            logger.exception(f"❌ Erreur nettoyage : {e}")
+            session.rollback()
+        finally:
+            session.close()
+
+    def is_ad_analyzed(self, ad_id: str) -> bool:
+        """
+        Vérifie si une annonce existe déjà ET possède une analyse IA.
+        Retourne True si on peut éviter de la scrapper à nouveau.
+        """
+        session = self.Session()
+        try:
+            # On ne sélectionne que la colonne ai_analysis pour être très rapide
+            # (Pas besoin de charger tout l'objet)
+            ad = session.query(Ad.ai_analysis).filter_by(id=ad_id).first()
+
+            # Si l'annonce existe et que le champ ai_analysis n'est pas vide -> True
+            if ad and ad.ai_analysis:
+                return True
+            return False
+        except Exception:
+            return False
+        finally:
+            session.close()
+
+    def _safe_int(self, value):
+        if not value:
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        try:
+            return int(''.join(filter(str.isdigit, str(value))))
+        except:
+            return None
+
+    def _parse_date(self, date_str):
+        if not date_str:
+            return datetime.now()
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+        except:
+            return datetime.now()
+
+    def fetch_ads_for_price_training(self, search_id: str) -> List[Dict[str, Any]]:
+        """
+        Renvoie les champs nécessaires à la construction du dataset de training
+        (y compris veto: k_arnaque, status, user_status, has_scores).
+        """
+        session = self.Session()
+        try:
+            ads = (
+                session.query(
+                    Ad.price, Ad.year, Ad.mileage, Ad.horsepower,
+                    Ad.scores, Ad.status, Ad.user_status
+                )
+                .filter(Ad.found_by_searches.contains([search_id]))
+                .all()
+            )
+
+            rows: List[Dict[str, Any]] = []
+            for price, year, mileage, horsepower, scores, status, user_status in ads:
+                scores_dict = scores or {}
+                sanity = scores_dict.get("sanity_checks", {})
+                rows.append({
+                    "price": price,
+                    "year": year,
+                    "mileage": mileage,
+                    "horsepower": horsepower,
+                    "k_arnaque": sanity.get("k_arnaque"),
+                    "status": status,
+                    "user_status": user_status,
+                    "has_scores": bool(scores),
+                })
+            return rows
+        finally:
+            session.close()
+
+    def fetch_active_ads_for_deal_update(self, search_id: str) -> List[Dict[str, Any]]:
+        """
+        Renvoie les champs nécessaires pour recalculer S_Deal sur les annonces actives.
+        On renvoie des dicts pour éviter de manipuler directement des objets ORM dans PriceEngine.
+        """
+        session = self.Session()
+        try:
+            ads = (
+                session.query(
+                    Ad.id, Ad.price, Ad.year, Ad.mileage, Ad.horsepower,
+                    Ad.ai_analysis, Ad.scores
+                )
+                .filter(
+                    Ad.found_by_searches.contains([search_id]),
+                    Ad.status == "ACTIVE"
+                )
+                .all()
+            )
+
+            rows: List[Dict[str, Any]] = []
+            for ad_id, price, year, mileage, horsepower, ai_analysis, scores in ads:
+                rows.append({
+                    "id": ad_id,
+                    "price": price,
+                    "year": year,
+                    "mileage": mileage,
+                    "horsepower": horsepower,
+                    "ai_analysis": ai_analysis or {},
+                    "scores": scores or {},
+                })
+            return rows
+        finally:
+            session.close()
+
+    def bulk_update_scores(self, updates: List[Dict[str, Any]]) -> int:
+        """
+        updates = [{"id": "...", "scores": {...}}, ...]
+        Retourne le nombre d'updates appliquées.
+        """
+        if not updates:
+            return 0
+
+        session = self.Session()
+        try:
+            count = 0
+            for upd in updates:
+                ad_id = upd["id"]
+                new_scores = upd["scores"]
+                ad = session.query(Ad).filter_by(id=ad_id).first()
+                if not ad:
+                    continue
+
+                ad.scores = dict(new_scores)  # assignation explicite
+                flag_modified(ad, "scores")
+                count += 1
+
+            session.commit()
+            return count
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def get_ad(self, ad_id: str) -> Optional[Ad]:
+        session = self.Session()
+        try:
+            return session.query(Ad).filter_by(id=ad_id).first()
+        finally:
+            session.close()
+
+    def mark_ad_sold(self, ad_id: str) -> bool:
+        session = self.Session()
+        try:
+            ad = session.query(Ad).filter_by(id=ad_id).first()
+            if not ad:
+                return False
+            ad.status = "SOLD"          # on reste aligné avec archive_old_ads
+            ad.last_seen_at = datetime.now()
+            session.commit()
+            return True
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def fetch_ad_details(self, ad_id: str) -> Optional[Dict[str, Any]]:
+        """Retourne une annonce sous forme de dict prêt UI."""
+        session = self.Session()
+        try:
+            ad = session.query(Ad).filter_by(id=ad_id).first()
+            if not ad:
+                return None
+
+            return {
+                "id": ad.id,
+                "url": ad.url,
+                "title": ad.title,
+                "description": ad.description,
+                "price": ad.price,
+                "mileage": ad.mileage,
+                "year": ad.year,
+                "fuel": ad.fuel,
+                "gearbox": ad.gearbox,
+                "horsepower": ad.horsepower,
+                "finition": ad.finition,
+                "location": ad.location,
+                "zipcode": ad.zipcode,
+                "seller_rating": ad.seller_rating,
+                "seller_rating_count": ad.seller_rating_count,
+                "publication_date": ad.publication_date,
+                "first_seen_at": ad.first_seen_at,
+                "last_seen_at": ad.last_seen_at,
+                "status": ad.status,
+                "user_status": ad.user_status,
+                "is_favorite": ad.is_favorite,
+
+                # collections JSONB / ARRAY → jamais dict(...)
+                "found_by_searches": list(ad.found_by_searches or []),
+                "price_history": list(ad.price_history or []),
+
+                # scores & IA peuvent être dict OU None → on renvoie tel quel
+                "scores": ad.scores if ad.scores is not None else {},
+                "ai_analysis": ad.ai_analysis if ad.ai_analysis is not None else {},
+
+                # raw_data peut être list (attributs LBC) OU dict → on renvoie tel quel
+                "raw_data": ad.raw_data if ad.raw_data is not None else {},
+            }
+        finally:
+            session.close()
+
+    def set_favorite(self, ad_id: str, is_favorite: bool) -> bool:
+        session = self.Session()
+        try:
+            ad = session.query(Ad).filter_by(id=ad_id).first()
+            if not ad:
+                return False
+            ad.is_favorite = bool(is_favorite)
+            session.commit()
+            return True
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def set_user_status(self, ad_id: str, user_status: str) -> bool:
+        """user_status: NORMAL | TRASH | SCAM_MANUAL"""
+        session = self.Session()
+        try:
+            ad = session.query(Ad).filter_by(id=ad_id).first()
+            if not ad:
+                return False
+            ad.user_status = user_status
+            session.commit()
+            return True
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def list_ads_for_selector(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """
+        Liste d'annonces pour alimenter le selectbox de la page Details Ads.
+        On exclut TRASH par défaut.
+        """
+        session = self.Session()
+        try:
+            rows = (
+                session.query(
+                    Ad.id, Ad.title, Ad.price, Ad.status, Ad.user_status, Ad.last_seen_at
+                )
+                .filter(Ad.user_status != "TRASH")
+                .order_by(Ad.last_seen_at.desc())
+                .limit(int(limit))
+                .all()
+            )
+
+            return [
+                {
+                    "id": ad_id,
+                    "title": title,
+                    "price": price,
+                    "status": status,
+                    "user_status": user_status,
+                    "last_seen_at": last_seen_at,
+                }
+                for (ad_id, title, price, status, user_status, last_seen_at) in rows
+            ]
+        finally:
+            session.close()
+
+
+if __name__ == "__main__":
+    logger.info("🚀 Démarrage du test COMPLET BDD...")
+
+    # 1. Connexion
+    db = DatabaseClient()
+
+    # 2. Test Insertion
+    print("\n--- TEST 1 : Insertion ---")
+    fake_data = [{
+        "id": "test_archive_logic",
+        "title": "Voiture qui va disparaître",
+        "price": 1000,
+        "url": "http://test",
+        "date": "2023-01-01 12:00:00"
+    }]
+    db.upsert_ads(fake_data, search_id="test_uuid")
+
+    # 3. Test Archivage (Simulation)
+    print("\n--- TEST 2 : Archivage ---")
+    # Pour tester, on va tricher et changer la date 'last_seen_at' en base directement via SQL
+    # (C'est juste pour le test ici, en vrai ça se fera avec le temps)
+    session = db.Session()
+    ad = session.query(Ad).filter_by(id="test_archive_logic").first()
+    if ad:
+        # On fait croire qu'on l'a vue il y a 10 jours
+        ad.last_seen_at = datetime.now() - timedelta(days=10)
+        session.commit()
+        print("🕒 (Triche) On a vieilli l'annonce de 10 jours pour le test.")
+    session.close()
+
+    # On lance le nettoyage avec un seuil de 2 jours.
+    # Comme l'annonce a 10 jours, elle doit passer en SOLD.
+    db.archive_old_ads(days_threshold=2)
+
+    print("\n✅ Si tu vois 'Ménage terminé : 1 annonces...', tout fonctionne !")
+
+
+==================================================
+FILE_PATH: core\logging_config.py
+==================================================
+import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from core.app_config import load_app_config
+import sys
+
+
+def setup_logging(log_path: str | None = None, level: int = logging.INFO) -> None:
+    cfg = load_app_config()
+    if log_path is None:
+        log_path = str(cfg.paths.worker_log_file)
+
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+
+    fmt = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s %(name)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=5_000_000,   # 5MB
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(fmt)
+    file_handler.name = "lbc_file_handler"  # tag utile
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(fmt)
+    console_handler.name = "lbc_console_handler"
+
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    # ✅ Idempotent: retire uniquement NOS handlers (évite de casser Streamlit)
+    root.handlers = [h for h in root.handlers if getattr(
+        h, "name", "") not in {"lbc_file_handler", "lbc_console_handler"}]
+
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
+
+
+==================================================
+FILE_PATH: core\models.py
+==================================================
+from sqlalchemy import Column, String, Integer, DateTime, Text, Float, Boolean
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import declarative_base
+from datetime import datetime
+
+Base = declarative_base()
+
+
+class Ad(Base):
+    __tablename__ = "ads"
+
+    # --- 1. IDENTIFICATION ---
+    id = Column(String, primary_key=True)
+    url = Column(String, nullable=False)
+
+    # --- 2. LIEN RECHERCHES ---
+    found_by_searches = Column(JSONB, default=list)
+
+    # --- 3. INFOS VÉHICULE ---
+    title = Column(String)
+    description = Column(Text)
+    price = Column(Integer)
+    mileage = Column(Integer, nullable=True)
+    year = Column(Integer, nullable=True)
+    fuel = Column(String, nullable=True)
+    gearbox = Column(String, nullable=True)
+    horsepower = Column(Integer, nullable=True)
+    finition = Column(String, nullable=True)
+
+    # --- 4. LOCALISATION ---
+    location = Column(String, nullable=True)
+    zipcode = Column(String, nullable=True)
+
+    # --- 5. INFOS VENDEUR ---
+    seller_rating = Column(Float, nullable=True)
+    seller_rating_count = Column(Integer, default=0)
+
+    # --- 6. TEMPOREL ---
+    publication_date = Column(DateTime)
+    first_seen_at = Column(DateTime, default=datetime.now)
+    last_seen_at = Column(DateTime, default=datetime.now)
+
+    # --- 7. STATUS ROBOT ---
+    status = Column(String, default="ACTIVE")  # ACTIVE, SOLD, DELETED
+
+    # --- 8. MÉMOIRE ---
+    price_history = Column(JSONB, default=list)
+
+    # --- 9. INTELLIGENCE ---
+    scores = Column(JSONB, nullable=True)
+    ai_analysis = Column(JSONB, nullable=True)
+
+    # --- 10. DATA BRUTE ---
+    raw_data = Column(JSONB)
+
+    # --- 11. GESTION UTILISATEUR (NOUVEAU) ---
+    # Permet de flaguer une annonce comme favori (cœur)
+    is_favorite = Column(Boolean, default=False)
+
+    # Permet de masquer une annonce (poubelle) ou de la signaler manuellement
+    # Valeurs possibles : 'NORMAL', 'TRASH', 'SCAM_MANUAL'
+    user_status = Column(String, default="NORMAL")
+
+    def __repr__(self):
+        return f"<Ad {self.id} [{self.status}] : {self.title} ({self.price}€)>"
+
+
+==================================================
+FILE_PATH: core\price_engine.py
+==================================================
+import logging
+from typing import Any, Dict, Optional
+
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
+
+from .db_client import DatabaseClient
+from .models import Ad
+from .scoring_config import SCORING_CONFIG
+from .search_manager import SearchManager
+
+logger = logging.getLogger(__name__)
+
+
+class PriceEngine:
+    def __init__(self, db_client: DatabaseClient):
+        self.db = db_client
+
+        params = SCORING_CONFIG["price_engine"]["model_params"]
+        self.model = RandomForestRegressor(
+            n_estimators=int(params["n_estimators"]),
+            random_state=int(params["random_state"]),
+        )
+        self.is_trained = False
+
+        # MÉMOIRE DU MODÈLE
+        self.model_meta: Dict[str, Any] = {
+            "features_used": [],
+            "imputers": {},
+        }
+
+    def get_data_for_search(self, search_id: str) -> pd.DataFrame:
+        try:
+            rows = self.db.fetch_ads_for_price_training(search_id)
+            if not rows:
+                return pd.DataFrame()
+
+            df = pd.DataFrame(rows)
+            if df.empty:
+                return pd.DataFrame()
+
+            df = df.dropna(subset=["price", "year", "mileage"])
+
+            veto = SCORING_CONFIG["price_engine"].get("veto", {})
+            min_k = float(veto.get("min_k_arnaque_for_market", 0.5))
+            exclude_user = set(veto.get("exclude_user_status", []))
+            exclude_status = set(veto.get("exclude_status", []))
+            require_scores = bool(veto.get("require_ai_scores", True))
+
+            if require_scores:
+                df = df[df["has_scores"] == True]
+                df = df[df["k_arnaque"].notna()]
+
+            df = df[df["k_arnaque"] >= min_k]
+
+            if exclude_user:
+                df = df[~df["user_status"].isin(exclude_user)]
+            if exclude_status:
+                df = df[~df["status"].isin(exclude_status)]
+
+            if df.empty:
+                return pd.DataFrame()
+
+            # prix aberrant relatif (ratio * médiane/mean)
+            price_floor_ratio = float(veto.get("price_floor_ratio", 0.30))
+            price_floor_stat = str(
+                veto.get("price_floor_stat", "median")).lower()
+            legacy_min_price = veto.get("min_price_aberrant", None)
+
+            stat_val = float(df["price"].mean()) if price_floor_stat == "mean" else float(
+                df["price"].median())
+            if stat_val > 0:
+                df = df[df["price"] >= price_floor_ratio * stat_val]
+            elif legacy_min_price is not None:
+                df = df[df["price"] >= int(legacy_min_price)]
+
+            if df.empty:
+                return pd.DataFrame()
+
+            # outliers
+            limits = SCORING_CONFIG["price_engine"]["outliers"]
+            df = df[
+                (df["price"] >= limits["min_price"]) &
+                (df["price"] <= limits["max_price"]) &
+                (df["mileage"] >= limits["min_mileage"]) &
+                (df["mileage"] <= limits["max_mileage"])
+            ]
+
+            if df.empty:
+                return pd.DataFrame()
+
+            return df[["price", "year", "mileage", "horsepower"]].copy()
+
+        except Exception as e:
+            logger.exception(
+                "Erreur get_data_for_search(%s): %s", search_id, e)
+            return pd.DataFrame()
+
+    def train(self, search_id: str, df: pd.DataFrame) -> None:
+        training_cfg = SCORING_CONFIG["price_engine"].get("training", {})
+        min_samples = int(training_cfg.get("min_samples", 30))
+
+        if df is None or df.empty or len(df) < min_samples:
+            logger.warning(
+                "Pas assez de données propres pour entraîner (n=%s < min_samples=%s) [search=%s]",
+                0 if df is None else len(df),
+                min_samples,
+                search_id,
+            )
+            self.is_trained = False
+            SearchManager.update_model_meta(search_id, {"r2_score": "N/A"})
+            return
+
+        # 1) FEATURES OBLIGATOIRES
+        base_features = ["year", "mileage"]
+        final_features = base_features.copy()
+
+        # 2) FEATURES DYNAMIQUES
+        dyn_conf = SCORING_CONFIG["price_engine"]["dynamic_features"]
+        for col in dyn_conf.get("candidates", []):
+            if col in df.columns:
+                fill_rate = df[col].notna().mean()
+                if fill_rate >= float(dyn_conf.get("min_fill_rate", 0.6)):
+                    median_val = float(df[col].median())
+                    self.model_meta["imputers"][col] = median_val
+                    df[col] = df[col].fillna(median_val)
+                    final_features.append(col)
+                    logger.info(
+                        "Feature retenue: %s (fill_rate=%.0f%%)", col, fill_rate * 100)
+                else:
+                    logger.info(
+                        "Feature rejetée: %s (fill_rate=%.0f%%)", col, fill_rate * 100)
+
+        self.model_meta["features_used"] = final_features
+
+        # 3) ENTRAÎNEMENT
+        X = df[final_features]
+        y = df["price"]
+
+        self.model.fit(X, y)
+        self.is_trained = True
+
+        # Score R² (sur train, conforme à ton implémentation)
+        score = float(self.model.score(X, y))
+        logger.info(
+            "Modèle entraîné [search=%s] features=%s R²=%.2f", search_id, final_features, score)
+        SearchManager.update_model_meta(
+            search_id, {"r2_score": round(score, 2)})
+
+    def predict_price(self, year: int, km: int, hp: int | None = None) -> Optional[float]:
+        if not self.is_trained:
+            return None
+
+        try:
+            input_data: Dict[str, Any] = {"year": year, "mileage": km}
+
+            for col in self.model_meta["features_used"]:
+                if col in ("year", "mileage"):
+                    continue
+
+                if col == "horsepower":
+                    input_data[col] = hp if hp is not None else self.model_meta["imputers"].get(
+                        col, 0)
+
+            features_df = pd.DataFrame([input_data])[
+                self.model_meta["features_used"]]
+            predicted = float(self.model.predict(features_df)[0])
+            return round(predicted, 2)
+
+        except Exception as e:
+            logger.exception("Erreur predict_price: %s", e)
+            return None
+
+    @staticmethod
+    def _deal_score_from_ratio(ratio: float) -> float:
+        cfg = SCORING_CONFIG["price_engine"]["scoring"]
+
+        r_good = float(cfg["good_deal_ratio"])
+        r_neutral = float(cfg.get("neutral_ratio", 1.0))
+        r_bad = float(cfg["bad_deal_ratio"])
+
+        if ratio <= r_good:
+            return 100.0
+        if ratio >= r_bad:
+            return 0.0
+
+        if ratio <= r_neutral:
+            # 100 → 50
+            return 50.0 + (r_neutral - ratio) * (50.0 / (r_neutral - r_good))
+        else:
+            # 50 → 0
+            return 50.0 - (ratio - r_neutral) * (50.0 / (r_bad - r_neutral))
+
+    def update_deal_scores(self, search_id: str) -> None:
+        logger.info("Audit du marché [search=%s]...", search_id)
+
+        df = self.get_data_for_search(search_id)
+        if df.empty:
+            logger.warning(
+                "Dataset marché vide après veto/outliers [search=%s].", search_id)
+            self.is_trained = False
+            SearchManager.update_model_meta(search_id, {"r2_score": "N/A"})
+            return
+
+        self.train(search_id, df)
+        if not self.is_trained:
+            logger.warning(
+                "Modèle non entraîné, deal scores non mis à jour [search=%s].", search_id)
+            return
+
+        try:
+            ads = self.db.fetch_active_ads_for_deal_update(search_id)
+            updates = []
+
+            for ad in ads:
+                year = ad.get("year")
+                mileage = ad.get("mileage")
+                if not year or not mileage:
+                    continue
+
+                fair_price = self.predict_price(
+                    year, mileage, ad.get("horsepower"))
+                if not fair_price or fair_price <= 0:
+                    continue
+
+                # prix virtuel
+                repair_cost = 0
+                ai_analysis = ad.get("ai_analysis") or {}
+                for frais in ai_analysis.get("frais_chiffrables", []):
+                    repair_cost += int(frais.get("cout") or 0)
+
+                price = int(ad.get("price") or 0)
+                virtual_price = price + repair_cost
+
+                ratio = virtual_price / fair_price if fair_price > 0 else 1.0
+
+                s_deal = self._deal_score_from_ratio(ratio)
+                s_deal = max(0.0, min(100.0, s_deal))
+
+                current_scores = dict(ad.get("scores") or {})
+                current_scores.setdefault("base", {})
+                current_scores.setdefault("financial", {})
+
+                current_scores["base"]["deal"] = int(round(s_deal))
+                current_scores["financial"]["market_estimation"] = int(
+                    round(fair_price))
+                current_scores["financial"]["virtual_price"] = int(
+                    virtual_price)
+
+                # Recalcul total
+                s_conf = float(current_scores.get("base", {}).get("conf", 50))
+                s_prod = float(current_scores.get("base", {}).get("prod", 0))
+                weights = SCORING_CONFIG["weights"]
+
+                total = (s_deal * weights["deal"]) + (s_conf *
+                                                      weights["conf"]) + (s_prod * weights["prod"])
+
+                sanity = current_scores.get("sanity_checks", {})
+                k_meca = float(sanity.get("k_meca", 1.0))
+                k_modif = float(sanity.get("k_modif", 1.0))
+                k_arnaque = float(sanity.get("k_arnaque", 1.0))
+
+                current_scores["total"] = round(
+                    total * k_meca * k_modif * k_arnaque, 1)
+
+                updates.append({"id": ad["id"], "scores": current_scores})
+
+            updated = self.db.bulk_update_scores(updates)
+            logger.info(
+                "Market Update OK: %s cotes mises à jour [search=%s].", updated, search_id)
+
+        except Exception as e:
+            logger.exception("Erreur update_deal_scores(%s): %s", search_id, e)
+
+
+==================================================
+FILE_PATH: core\rescan_service.py
+==================================================
+import logging
+from datetime import datetime
+import requests
+
+from core.db_client import DatabaseClient
+from core.scraper import LBCScraper
+from core.ai_analyst import AIAnalyst
+from core.price_engine import PriceEngine
+from core import config
+
+logger = logging.getLogger(__name__)
+
+
+def _is_ad_alive(url: str) -> bool:
+    """Check rapide, cohérent avec archive_old_ads()."""
+    headers = config.get_random_headers()
+    r = requests.head(url, headers=headers, timeout=5, allow_redirects=True)
+    return r.status_code == 200
+
+
+def rescan_ad(ad_id: str) -> dict:
+    """
+    Re-scan manuel:
+      - HEAD check
+      - si KO -> status SOLD
+      - sinon -> refresh description + IA + upsert + recalcul deal score
+    Retourne un dict résultat pour l'UI.
+    """
+    db = DatabaseClient()
+    ad = db.get_ad(ad_id)
+    if not ad:
+        return {"ok": False, "reason": "NOT_FOUND"}
+
+    # Optionnel: ne pas rescanner une annonce TRASH
+    if ad.user_status == "TRASH":
+        return {"ok": False, "reason": "TRASHED"}
+
+    url = ad.url
+    logger.info("🔄 Re-scan demandé pour ad=%s url=%s", ad_id, url)
+
+    try:
+        alive = _is_ad_alive(url)
+    except Exception:
+        logger.exception("⚠️ Re-scan: erreur check alive")
+        return {"ok": False, "reason": "ALIVE_CHECK_ERROR"}
+
+    if not alive:
+        db.mark_ad_sold(ad_id)
+        logger.info("👻 Re-scan: annonce non accessible -> SOLD (%s)", ad_id)
+        return {"ok": True, "reason": "MARKED_SOLD"}
+
+    # 1) Refresh description
+    full_desc = LBCScraper.get_ad_description(url)
+    if not full_desc:
+        full_desc = ad.description  # fallback
+
+    # 2) Prépare un dict ad_data cohérent avec upsert_ads()
+    # (on réutilise tes champs habituels)
+    ad_dict = {
+        "id": ad.id,
+        "title": ad.title,
+        "price": ad.price,
+        "url": ad.url,
+        "location": ad.location,
+        "zipcode": ad.zipcode,
+        "date": ad.publication_date.strftime("%Y-%m-%d %H:%M:%S") if ad.publication_date else None,
+        "km": ad.mileage,
+        "year": ad.year,
+        "fuel": ad.fuel,
+        "gearbox": ad.gearbox,
+        "horsepower": ad.horsepower,
+        "finition": ad.finition,
+        "seller_rating": ad.seller_rating,
+        "seller_rating_count": ad.seller_rating_count,
+        "raw_attributes": ad.raw_data,
+        "description": full_desc,
+    }
+
+    # 3) IA re-run
+    analyst = AIAnalyst()
+    ai_result = analyst.analyze_ad(ad_dict)
+    if not ai_result:
+        logger.warning("🧠 Re-scan: IA a retourné None (%s)", ad_id)
+        # On met quand même last_seen à jour via upsert sans IA
+    else:
+        ad_dict.update(ai_result)
+
+    # 4) Upsert (réutilise price_history, last_seen_at, status ACTIVE, etc.)
+    # Important: on a besoin d’un search_id. On prend le premier.
+    search_ids = list(ad.found_by_searches or [])
+    if not search_ids:
+        # fallback: pas idéal, mais on évite de planter
+        # (à terme, on impose toujours found_by_searches non vide)
+        logger.warning("Re-scan: annonce sans found_by_searches (%s)", ad_id)
+        db.upsert_ads([ad_dict], search_id="manual_rescan")
+        return {"ok": True, "reason": "UPDATED_NO_SEARCH"}
+
+    primary_search_id = search_ids[0]
+    db.upsert_ads([ad_dict], search_id=primary_search_id)
+
+    # 5) Recalcul deal score pour les searches concernées
+    price_engine = PriceEngine(db)
+    for sid in search_ids:
+        try:
+            price_engine.update_deal_scores(sid)
+        except Exception:
+            logger.exception(
+                "💰 Re-scan: deal score update failed for search=%s", sid)
+
+    logger.info("✅ Re-scan terminé (%s)", ad_id)
+    return {"ok": True, "reason": "UPDATED"}
+
+
+==================================================
+FILE_PATH: core\scoring_config.py
+==================================================
+# scoring_config.py
+
+# C'est ici que tu règles la sensibilité du bot sans toucher au code.
+SCORING_CONFIG = {
+    # --- A. FORMULE MAÎTRESSE (Pondération des piliers) ---
+    # Total doit faire 1.0 (ou 100%)
+    "weights": {
+        "deal": 0.5,   # 50% Prix/Frais (Calculé par le PriceEngine)
+        "conf": 0.3,   # 30% Confiance (Calculé par l'IA + Stats Vendeur)
+        "prod": 0.2    # 20% Produit (Note IA sur les options/finition)
+    },
+
+    # --- B. VALEURS DE BASE ---
+    "base_scores": {
+        "deal": 50,  # Valeur par défaut avant calcul mathématique
+        "conf": 50,  # Valeur neutre
+        "prod": 0    # Le produit est noté de 0 à 10 par l'IA, donc part de 0
+    },
+
+    # --- C. PILIER CONFIANCE (Règles) ---
+    "confiance": {
+        "default_bonus_val": 5,
+        "default_malus_val": -5,
+
+        # Mots-clés détectés par Gemini (Bonus)
+        "bonus_tags": {
+            "premiere_main": 15,
+            "carnet_entretien": 10,
+            "factures": 10,
+            "suivi_garage": 5,
+            "vendeur_pro": 5,
+            "garantie": 5,
+            "ct_ok": 5
+        },
+        # Mots-clés détectés par Gemini (Malus)
+        "malus_tags": {
+            "orthographe_deplorable": -15,
+            "ton_agressif": -10,
+            "description_vague": -10,
+            "cause_depart_suspecte": -5
+        },
+        # Note Vendeur Leboncoin (0.0 à 1.0)
+        "seller": {
+            "min_reviews": 5,       # Minimum d'avis pour être pris en compte
+            "top_threshold": 0.90,  # > 90% satisfaits -> Bonus
+            "bad_threshold": 0.60,  # < 60% satisfaits -> Malus
+            "bonus_val": 10,
+            "malus_val": -10
+        },
+        # Longueur de la description (indicateur d'effort)
+        "description": {
+            "short_len": 10,   # < 10 mots
+            "short_pen": -15,  # Grosse pénalité
+            "long_len": 100,   # > 100 mots
+            "long_bon": 5      # Petit bonus
+        }
+    },
+
+    # --- D. MOTEUR DE PRIX (Price Engine) ---
+    "price_engine": {
+        # Paramètres de l'IA Mathématique (Random Forest)
+        "model_params": {
+            "n_estimators": 100,  # Nombre d'arbres de décision
+            "random_state": 42   # Pour avoir des résultats reproductibles
+        },
+
+        # Seuils pour nettoyer les données aberrantes (Outliers) avant d'apprendre
+        "outliers": {
+            "min_price": 500,       # On ignore les épaves symboliques
+            "max_price": 200000,    # On ignore les erreurs de saisie millions
+            "min_mileage": 500,     # On ignore les fausses voitures neuves
+            "max_mileage": 900000   # On ignore les erreurs de km
+        },
+
+        # Gestion Dynamique des Colonnes (Smart Feature Selection)
+        "dynamic_features": {
+            # Seuil : Si une colonne est remplie à moins de X%, on la jette.
+            "min_fill_rate": 0.6,  # 30% des annonces doivent avoir l'info
+
+            # Liste des colonnes qu'on tente d'utiliser si elles sont remplies
+            # (On ne met pas 'finition' pour l'instant car c'est du texte sale)
+            "candidates": ["horsepower"]
+        },
+
+        # Paramètres de calcul du Score Deal
+        "scoring": {
+            # Si (Prix+Repa) / Cote < 0.8 -> Top affaire
+            "good_deal_ratio": 0.5,   # => 100
+            "neutral_ratio": 1.0,     # => 50
+            "bad_deal_ratio": 1.5     # => 0
+        },
+        "training": {
+            # (choix v1) >10 pour éviter l'instabilité, <50 pour ne pas bloquer trop souvent
+            "min_samples": 15,
+        },
+        "veto": {
+            "min_k_arnaque_for_market": 0.5,
+            "price_floor_ratio": 0.30,     # < 30% médiane => aberrant
+            "price_floor_stat": "median",  # median ou mean
+            "exclude_user_status": ["TRASH", "SCAM_MANUAL"],
+            "exclude_status": ["SCAM"],
+            "require_ai_scores": True
+        },
+    },
+    # --- E. K modif coef ---
+    "severity": {
+        # Agrégation saturée = (alpha * max) + (1-alpha) * min(sum, sum_cap)
+        # puis K = 1 - penalty, borné par k_min.
+
+        "meca": {
+            "alpha": 0.40,   # plus cumulatif (le max compte, mais pas trop)
+            # on laisse cumuler davantage (plusieurs risques mécas peuvent s'additionner)
+            "sum_cap": 1.00,
+            "k_min": 0.25,   # si c'est vraiment mauvais, ça peut descendre bas
+        },
+        "modif": {
+            "alpha": 0.75,
+            "sum_cap": 0.60,
+
+            # Planchers à 2 étages
+            "k_min": 0.70,            # plancher “soft”
+            "hard_threshold": 0.80,   # si max severity >= 0.80 → modif lourde
+            "k_min_hard": 0.30,       # plancher “hard” (stage2+, swap, etc.)
+        },
+        "arnaque": {
+            "alpha": 0.90,   # quasi worst-case
+            "sum_cap": 0.40,  # quelques signaux s'additionnent mais cap vite
+            "k_min": 0.05,   # un gros signal peut quasiment tuer le score
+        },
+    }
+}
+
+
+==================================================
+FILE_PATH: core\scraper.py
+==================================================
+import requests
+import json
+from bs4 import BeautifulSoup
+import time
+import random
+from . import config
+import logging
+from .app_config import load_app_config
+
+
+logger = logging.getLogger(__name__)
+
+
+class LBCScraper:
+    @staticmethod
+    def fetch_html(lbc_params: dict) -> str | None:
+        """Fait la requête HTTP de recherche."""
+        try:
+            cfg = load_app_config().scraper
+            sleep_time = random.uniform(
+                cfg.min_sleep_seconds, cfg.max_sleep_seconds)
+            logger.info(f"   💤 Pause sécu de {sleep_time:.2f}s...")
+            time.sleep(sleep_time)
+
+            headers = config.get_random_headers()
+            logger.info(
+                f"   🌐 GET Search (Recherche: {lbc_params.get('text')})...")
+
+            response = requests.get(
+                config.LBC_BASE_URL,
+                headers=headers,
+                params=lbc_params,
+                timeout=cfg.request_timeout_seconds
+            )
+            if response.status_code == 403:
+                logger.exception("   🛑 ERREUR 403 : IP Bloquée (Datadome).")
+                return None
+            response.raise_for_status()
+            return response.text
+
+        except Exception as e:
+            logger.exception(f"   ❌ Erreur réseau : {e}")
+            return None
+
+    @staticmethod
+    def parse_data(html: str) -> list:
+        """Extrait la liste des annonces depuis la recherche."""
+        if not html:
+            return []
+        soup = BeautifulSoup(html, 'html.parser')
+        script = soup.find("script", id="__NEXT_DATA__")
+        if not script:
+            return []
+        try:
+            return json.loads(script.string)["props"]["pageProps"]["searchData"]["ads"]
+        except:
+            return []
+
+    @staticmethod
+    def process_ads(ads_raw: list, whitelist: list, blacklist: list) -> list:
+        """Filtre la liste brute et extrait les données structurées."""
+        clean_ads = []
+        rejected_count = 0  # Compteur
+
+        for ad in ads_raw:
+            if "list_id" not in ad:
+                continue
+
+            title = ad.get("subject", "").lower()
+
+            # --- FILTRAGE ---
+            is_blacklisted = any(bad in title for bad in blacklist)
+            is_whitelisted = (not whitelist) or any(
+                good in title for good in whitelist)
+
+            if is_blacklisted or not is_whitelisted:
+                rejected_count += 1
+                continue
+
+            # --- 1. TRANSFORMATION DES ATTRIBUTS ---
+            raw_attrs_list = ad.get("attributes", [])
+            attrs_dict = {item["key"]: item["value"]
+                          for item in raw_attrs_list}
+            attrs_labels = {item["key"]: item.get(
+                "value_label") for item in raw_attrs_list}
+
+            price = LBCScraper._extract_price(ad)
+
+            # --- 2. EXTRACTION DES CHAMPS ---
+            ad_obj = {
+                "id": str(ad.get("list_id")),
+                "title": ad.get("subject"),
+                "price": price,
+                "url": ad.get("url"),
+                "location": ad.get("location", {}).get("city"),
+                "zipcode": ad.get("location", {}).get("zipcode"),
+                "date": ad.get("first_publication_date"),
+                "img": ad.get("images", {}).get("small_url"),
+                "km": LBCScraper._safe_int(attrs_dict.get("mileage")),
+                "year": LBCScraper._safe_int(attrs_dict.get("regdate")),
+                "fuel": attrs_labels.get("fuel"),
+                "gearbox": attrs_labels.get("gearbox"),
+                "horsepower": LBCScraper._safe_int(attrs_dict.get("horse_power_din")),
+                "finition": attrs_labels.get("u_car_finition"),
+                "seller_rating": float(attrs_dict.get("rating_score", 0)) if "rating_score" in attrs_dict else None,
+                "seller_rating_count": int(attrs_dict.get("rating_count", 0)) if "rating_count" in attrs_dict else 0,
+                "raw_attributes": ad.get("attributes"),
+                "description": None
+            }
+            clean_ads.append(ad_obj)
+
+        # --- LOG DU FILTRAGE ---
+        total = len(ads_raw)
+        kept = len(clean_ads)
+        logger.info(
+            f"   🧹 Filtre : {total} reçues -> {rejected_count} rejetées -> {kept} gardées.")
+
+        return clean_ads
+
+    @staticmethod
+    def get_ad_description(ad_url: str) -> str | None:
+        """Va sur la page de l'annonce et extrait la description complète."""
+        try:
+            cfg = load_app_config().scraper
+            time.sleep(random.uniform(cfg.ad_page_min_sleep_seconds,
+                       cfg.ad_page_max_sleep_seconds))
+            headers = config.get_random_headers()
+
+            response = requests.get(
+                ad_url, headers=headers, timeout=cfg.request_timeout_seconds)
+            if response.status_code != 200:
+                return None
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # Méthode 1 : Via JSON caché (souvent présent)
+            script = soup.find("script", id="__NEXT_DATA__")
+            if script:
+                try:
+                    data = json.loads(script.string)
+                    return data["props"]["pageProps"]["ad"]["body"]
+                except:
+                    pass
+
+            # Méthode 2 : Via HTML direct
+            desc_div = soup.find(
+                "div", {"data-qa-id": "adview_description_container"})
+            if desc_div:
+                return desc_div.get_text(separator="\n").strip()
+
+            return None
+
+        except Exception as e:
+            logger.exception(
+                f"      ⚠️ Impossible de lire la description : {e}")
+            return None
+
+    @staticmethod
+    def _safe_int(val):
+        try:
+            return int(val)
+        except:
+            return None
+
+    @staticmethod
+    def _extract_price(ad):
+        p = ad.get("price", [0])
+        return float(p[0]) if isinstance(p, list) and p else 0
+
+
+==================================================
+FILE_PATH: core\search_manager.py
+==================================================
+import json
+import os
+import re
+import uuid
+from datetime import datetime
+from .app_config import load_app_config
+from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
+SEARCH_DIR = load_app_config().paths.searches_dir
+SEARCH_DIR.mkdir(exist_ok=True)
+
+
+class SearchManager:
+    @staticmethod
+    def _save_file(search_data: dict):
+        # On construit un nom lisible : nom_propre + _ + ID + .json
+        safe_name = SearchManager._sanitize_filename(search_data['name'])
+        filename = f"{safe_name}_{search_data['id']}.json"
+
+        file_path = SEARCH_DIR / filename
+
+        # Si le fichier existait sous un autre nom (cas update), on le cherche pour l'écraser ou le renommer
+        old_path = SearchManager._find_file_by_id(search_data['id'])
+        if old_path and old_path.name != filename:
+            # On supprime l'ancien nom pour éviter les doublons
+            os.remove(old_path)
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(search_data, f, indent=4, ensure_ascii=False)
+
+    @staticmethod
+    def _sanitize_filename(search_name: str) -> str:
+        """Transforme 'Golf 7 GTI !' en 'golf_7_gti'"""
+        # Met en minuscule, remplace espaces par _, garde que les chiffres/lettres
+        clean = re.sub(r'[^a-z0-9]', '_', search_name.lower())
+        # Enlève les _ multiples (ex: golf__7)
+        clean = re.sub(r'_+', '_', clean).strip('_')
+        return clean
+
+    @staticmethod
+    def _find_file_by_id(search_id: str) -> None:
+        """Cherche le fichier qui contient l'ID dans son nom"""
+        # On cherche un fichier qui finit par cet ID
+        for file_path in SEARCH_DIR.glob(f"*{search_id}.json"):
+            return file_path
+        return None
+
+    @staticmethod
+    def build_params(search_text: str, min_year: str = None, max_year: str = None, min_price: str = None, max_price: str = None) -> dict:
+        """
+        Traduit des entrées utilisateur simples en dictionnaire technique LBC.
+        """
+        params = {
+            "category": "2",       # Toujours "Voiture"
+            "text": search_text,
+            "sort": "time"         # Toujours "Plus récent"
+        }
+
+        # --- Gestion de l'Année (regdate) ---
+        # LBC attend format: "min-max", "min-max", "min-" ou "-max"
+        if min_year and max_year:
+            params["regdate"] = f"{min_year}-{max_year}"
+        elif min_year:
+            # ou juste f"{min_year}-" selon version
+            params["regdate"] = f"{min_year}-max"
+        elif max_year:
+            # On met une date arbitraire basse
+            params["regdate"] = f"1900-{max_year}"
+
+        # --- Gestion du Prix (price) ---
+        if min_price and max_price:
+            params["price"] = f"{min_price}-{max_price}"
+        elif min_price:
+            params["price"] = f"{min_price}-max"
+        elif max_price:
+            params["price"] = f"500-{max_price}"
+        else:
+            params["price"] = f"500-max"
+
+        return params
+
+    @staticmethod
+    def list_searches(only_active: bool = False) -> list:
+        lst_searches = []
+        # On scanne tous les JSON du dossier
+        for file_path in SEARCH_DIR.glob("*.json"):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    search_data = json.load(f)
+                    if only_active and not search_data.get("active"):
+                        continue
+                    lst_searches.append(search_data)
+            except:
+                pass
+        return lst_searches
+
+    @staticmethod
+    def create_search(name: str, lbc_params: dict, whitelist: list = None, blacklist: list = None) -> str:
+        # 1. SÉCURITÉ ANTI-DOUBLON
+        # On regarde si une recherche porte déjà ce nom exact
+        existing_searches = SearchManager.list_searches()
+        for s in existing_searches:
+            if s['name'] == name:
+                logger.info(
+                    f"⚠️ La recherche '{name}' existe déjà (ID: {s['id']}). On ne la recrée pas.")
+                return s['id']  # On renvoie l'ID existant sans rien faire
+        # 2. CRÉATION NORMALE
+        search_id = str(uuid.uuid4())
+        search_data = {
+            "id": search_id,
+            "name": name,
+            "active": True,
+            "created_at": datetime.now().isoformat(),
+            "last_run_at": None,
+            "lbc_params": lbc_params,
+            "filters": {
+                "whitelist": whitelist if whitelist else [],
+                "blacklist": blacklist if blacklist else []
+            }
+        }
+        SearchManager._save_file(search_data)
+        logger.info(f"✅ Recherche '{name}' créée (ID: {search_id})")
+        return search_id
+
+    @staticmethod
+    def update_model_meta(search_id: str, new_meta: dict):
+        """Met à jour le champ model_meta pour une recherche (utilisé par PriceEngine)."""
+        search_file = SearchManager._find_file_by_id(search_id)
+        if not search_file:
+            # Cette erreur ne devrait jamais arriver si le worker est bien lancé
+            return
+
+        with open(search_file, 'r', encoding='utf-8') as f:
+            search_data = json.load(f)
+
+        # Fusionne le nouveau meta avec l'ancien
+        search_data['model_meta'] = search_data.get('model_meta', {})
+        search_data['model_meta'].update(new_meta)
+
+        # Sauvegarde
+        SearchManager._save_file(search_data)
+
+    @staticmethod
+    def get_search(search_id: str) -> dict | None:
+        """Récupère la config. Plus complexe car le nom du fichier peut varier."""
+        file_path = SearchManager._find_file_by_id(search_id)
+        if file_path and file_path.exists():
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return None
+
+    @staticmethod
+    def update_last_run(search_id: str) -> None:
+        search_data = SearchManager.get_search(search_id)
+        if search_data:
+            search_data["last_run_at"] = datetime.now().isoformat()
+            SearchManager._save_file(search_data)
+
+    @staticmethod
+    def delete_search(search_id: str) -> None:
+        file_path = SearchManager._find_file_by_id(search_id)
+        if file_path and file_path.exists():
+            os.remove(file_path)
+            logger.info(f"🗑️ Fichier supprimé : {file_path.name}")
+
+
+def main() -> None:
+    print("==== Starter Searches ====")
+    # # --- Peugeot 106 Rallye (Phase 1 & 2) ---
+    # # Phase 1: 1993-1996 (1.3) / Phase 2: 1996-1998 (1.6)
+    # RALLYE_106 = SearchManager.build_params(
+    #     "106 rallye", min_year="1993", max_year="1999")
+    # SearchManager.create_search(
+    #     name="Peugeot 106 Rallye",
+    #     lbc_params=RALLYE_106,
+    #     whitelist=["rallye", "1.3", "1.6", "phase 1", "phase 2"],
+    #     blacklist=[
+    #         "s16", "xsi", "sport", "enfant", "quiksilver", "kid", "xn", "xr", "xt",
+    #         "diesel", "1.5d", "1.4", "jante", "piece", "recherche", "demande",
+    #         "accident", "export", "carte grise", "vends pieces"
+    #     ]
+    # )
+
+    # # --- Mazda MX-5 NA (Mk1) ---
+    # # Production 1989-1997
+    # MX5_NA = SearchManager.build_params(
+    #     "mx5", min_year="1989", max_year="1998")
+    # SearchManager.create_search(
+    #     name="Mazda MX-5 NA (Mk1)",
+    #     lbc_params=MX5_NA,
+    #     whitelist=["na", "mk1", "miata", "eunos",
+    #                "115", "90", "130", "pop up"],
+    #     blacklist=[
+    #         "nb", "mk2", "nc", "mk3", "nd", "mk4", "nbfl", "140", "145", "1.8 vvt",
+    #         "hardtop", "jante", "piece", "recherche", "demande", "location",
+    #         "accident", "export", "catalyseur"
+    #     ]
+    # )
+
+    # # --- Mazda MX-5 NB (Mk2 & NBFL) ---
+    # # Production 1998-2005
+    # MX5_NB = SearchManager.build_params(
+    #     "mx5", min_year="1998", max_year="2005")
+    # SearchManager.create_search(
+    #     name="Mazda MX-5 NB (Mk2)",
+    #     lbc_params=MX5_NB,
+    #     whitelist=["nb", "mk2", "nbfl", "1.6", "1.8",
+    #                "140", "145", "10th", "eterna", "phoenix"],
+    #     blacklist=[
+    #         "na", "mk1", "nc", "mk3", "nd", "mk4", "pop up", "miata",
+    #         "hardtop", "jante", "piece", "recherche", "demande", "location",
+    #         "accident", "export"
+    #     ]
+    # )
+
+    # # --- Ford Focus RS MK2 ---
+    # # Production 2009-2011 (Le 5 cylindres 2.5L)
+    # FOCUS_RS_MK2 = SearchManager.build_params(
+    #     "focus rs", min_year="2009", max_year="2011")
+    # SearchManager.create_search(
+    #     name="Ford Focus RS MK2",
+    #     lbc_params=FOCUS_RS_MK2,
+    #     whitelist=["mk2", "305", "2.5", "500", "5 cylindres"],
+    #     blacklist=[
+    #         "mk1", "mk3", "st", "st225", "diesel", "tdci", "titanium", "ghia", "trend",
+    #         "ecoboost", "2.3", "2.0", "1.6", "look rs", "kit rs", "replica", "pack rs",
+    #         "jante", "piece", "recherche", "demande", "accident", "export", "ligne"
+    #     ]
+    # )
+
+
+if __name__ == "__main__":
+    main()
+
+
+==================================================
+FILE_PATH: core\__init__.py
+==================================================
+
+
+==================================================
+FILE_PATH: docs\whitepaper_traceability.md
+==================================================
+# White paper traceability — LBC_HUNTER v1.0
+
+Ce document relie les exigences du white paper aux implémentations réelles (code + config),
+et décrit comment vérifier que le contrat reste respecté.
+
+## 0. Points d’entrée
+
+- Worker (scrape + IA + scoring + DB) : `main.py`
+- UI (Streamlit multi-pages) : `dashboard.py`, `pages/*`
+- Source unique de config runtime : `core/app_config.py`
+- Source unique de scoring : `core/scoring_config.py`
+- Contrat automatisé (invariants) : `tools/verify_contract.py`
+
+## 1. Architecture logique (résumé)
+
+### Flux Worker
+1. Liste des recherches (`core/search_manager.py`)
+2. Scraping résultats (`core/scraper.py`)
+3. Enrichissement (description + IA) (`core/scraper.py` + `core/ai_analyst.py`)
+4. Upsert DB (`core/db_client.py`)
+5. Market analysis / S_Deal (`core/price_engine.py`)
+6. Archivage annonces anciennes (`core/db_client.py`)
+
+### Flux UI
+1. Home : stats + tables + logs (`dashboard.py`, `frontend/data_loader.py`)
+2. Details Searches : analyse recherche + navigation vers annonce (`pages/1_🔍_Details_Searches.py`)
+3. Details Ads : fiche annonce (WIP/UX P1) (`pages/2_📄_Details_Ads.py`)
+4. Searches Manager (WIP/UX P1) (`pages/3_🎛️_Searches_Manager.py`)
+5. Settings (WIP/UX P1) (`pages/4_⚙️_Settings.py`)
+
+## 2. Règles white paper → Implémentation → Paramètres → Preuves
+
+### 2.1 Score final = score_base × (K_meca × K_modif × K_arnaque)
+- Implémentation :
+  - IA calcule les K (et score final) : `core/ai_analyst.py` (`_calculate_score`)
+  - PriceEngine met à jour S_Deal et recalcule total : `core/price_engine.py` (`update_deal_scores`)
+- Paramètres :
+  - poids : `core/scoring_config.py` → `SCORING_CONFIG["weights"]`
+  - base scores : `SCORING_CONFIG["base_scores"]`
+  - calibration K / severity (si présent) : `SCORING_CONFIG["severity"]` (ou équivalent)
+- Preuve :
+  - `tools/verify_contract.py` valide la somme des weights et les bornes de config.
+
+### 2.2 S_Deal basé sur le ratio (virtual_price / market_estimation) et configurable
+- Implémentation :
+  - calcul ratio + S_Deal : `core/price_engine.py` (fonction S_Deal / scoring)
+- Paramètres :
+  - `SCORING_CONFIG["price_engine"]["scoring"]` :
+    - `good_deal_ratio`, `neutral_ratio`, `bad_deal_ratio`
+- Preuve :
+  - `tools/verify_contract.py` valide `good < neutral < bad`
+
+### 2.3 Prix virtuel = prix affiché + frais chiffrables
+- Implémentation :
+  - IA : `core/ai_analyst.py` (virtual_price + repair_cost)
+  - PriceEngine : `core/price_engine.py` (recalcule virtual_price si frais présents)
+- Paramètres :
+  - structure JSON `ai_analysis.frais_chiffrables[]` (contract prompt IA)
+
+### 2.4 Robustesse Streamlit (cache, navigation, session_state)
+- Implémentation :
+  - cache : `frontend/data_loader.py` (`@st.cache_data(ttl=...)`)
+  - TTL : `core/app_config.py` → `streamlit.cache_ttl_seconds`
+  - navigation : `frontend/layout.py`, `dashboard.py`, `pages/*`
+- Preuve :
+  - navigation “clic recherche → details searches” et “clic annonce → details ads” fonctionne sans rerun/no-op.
+
+### 2.5 Logs unifiés et visibles dans l’UI
+- Implémentation :
+  - logging : `core/logging_config.py` (`setup_logging`)
+  - affichage UI : `frontend/data_loader.py` (`load_logs`)
+- Paramètres :
+  - `core/app_config.py` → `paths.worker_log_file`
+- Preuve :
+  - fichier de log rotatif présent et lisible via Home.
+
+### 2.6 Config unique (pas de magic numbers runtime)
+- Implémentation :
+  - runtime config : `core/app_config.py`
+  - usage : `core/scraper.py`, `main.py`, `frontend/data_loader.py`, `core/db_client.py`
+- Paramètres :
+  - variables d’environnement (.env / prod) :
+    - `DATABASE_URL`
+    - `SCRAPER_*`, `WORKER_*`, `STREAMLIT_CACHE_TTL`
+    - `LOGS_DIR`, `WORKER_LOG_FILE`, `SEARCHES_DIR`
+
+## 3. Procédure de vérification (avant merge / release)
+1. Lancer :
+   - `python tools/verify_contract.py`
+2. Vérifier manuellement (smoke test) :
+   - UI : `streamlit run dashboard.py`
+   - Worker : `python main.py`
+3. Vérifier logs UI :
+   - section “Logs Worker” sur Home.
+
+## 4. Hypothèses / limites connues (v1.0)
+- Pages UX (Details Ads / Searches Manager / Settings) : WIP → P1
+- Pas de tests unitaires systématiques en P0 (choix assumé), remplacé par contract checker + smoke tests.
+
+
+==================================================
+FILE_PATH: frontend\data_loader.py
+==================================================
+import streamlit as st
+import pandas as pd
+import os
+from core.db_client import DatabaseClient
+from core.models import Ad
+from core.search_manager import SearchManager
+from core.scoring_config import SCORING_CONFIG
+from core.app_config import load_app_config
+import logging
+
+logger = logging.getLogger(__name__)
+CACHE_TTL = load_app_config().streamlit.cache_ttl_seconds
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def load_home_data():
+    """Charge les données globales pour le Dashboard"""
+    db = DatabaseClient()
+    session = db.Session()
+
+    try:
+        # 1. Stats globales
+        status_counts = {"ACTIVE": 0, "SOLD": 0, "SCAM": 0}
+        ads_all = session.query(Ad.status, Ad.user_status).all()
+        for s, us in ads_all:
+            if us == "SCAM_MANUAL" or s == "SCAM":
+                status_counts["SCAM"] += 1
+            elif s == "SOLD":
+                status_counts["SOLD"] += 1
+            elif s == "ACTIVE":
+                status_counts["ACTIVE"] += 1
+
+        # 2. Opportunités & Favoris
+        query_active = session.query(Ad).filter(
+            Ad.status == "ACTIVE", Ad.user_status != "TRASH")
+
+        # Récupération des POIDS FRACTIONNELS (0.5, 0.3, 0.2)
+        weights = SCORING_CONFIG.get(
+            "weights", {"deal": 0.5, "conf": 0.3, "prod": 0.2})
+        w_deal = weights.get("deal", 0.5)
+        w_conf = weights.get("conf", 0.3)
+        w_prod = weights.get("prod", 0.2)
+
+        raw_data = []
+        for ad in query_active.all():
+            scores = ad.scores or {}
+            base = scores.get("base", {})
+            fin = scores.get("financial", {})
+            sanity = scores.get("sanity_checks", {})
+
+            # A. CALCUL GAIN/PERTE (Sécurisé)
+            market_price = fin.get("market_estimation", 0)
+            if market_price and market_price > 0:
+                virtual_price = fin.get("virtual_price", ad.price)
+                gain = market_price - virtual_price
+            else:
+                gain = 0  # Evite les pertes négatives si aucune cote marché n'est disponible
+
+            # B. CALCUL NOTE BRUTE (Somme Pondérée Directe)
+            s_deal = base.get("deal", 50)
+            s_conf = base.get("conf", 50)
+            s_prod = base.get("prod", 0)
+
+            try:
+                # Moyenne pondérée par poids fractionnels
+                note_brute = (s_deal * w_deal) + \
+                    (s_conf * w_conf) + (s_prod * w_prod)
+            except:
+                note_brute = 0
+
+            # C. CALCUL INDICE K (K Final)
+            k_meca = sanity.get("k_meca", 1.0)
+            k_modif = sanity.get("k_modif", 1.0)
+            k_arnaque = sanity.get("k_arnaque", 1.0)
+            k_final = k_meca * k_modif * k_arnaque
+
+            raw_data.append({
+                "ID": ad.id,
+                "Titre": ad.title,
+                "Prix": ad.price,
+                "Gain": gain,
+                "Note Brute": int(note_brute),
+                "Indice K": int(k_final * 100),
+                "Favori": ad.is_favorite,
+                "URL": ad.url,
+                "Search": ad.found_by_searches[0] if ad.found_by_searches else "N/A"
+            })
+
+        df_ads = pd.DataFrame(raw_data)
+
+        # 3. Recherches Actives
+        searches = SearchManager.list_searches()
+        df_searches = pd.DataFrame(searches)
+
+        if not df_searches.empty:
+            df_searches["Whitelist"] = df_searches["filters"].apply(
+                lambda x: ", ".join(x.get("whitelist", [])))
+            df_searches["Blacklist"] = df_searches["filters"].apply(
+                lambda x: ", ".join(x.get("blacklist", [])))
+
+            # FIX FINAL ANNEES : Extraction de regdate depuis lbc_params
+            def get_year_display(lbc_params_dict):
+                if not isinstance(lbc_params_dict, dict):
+                    return "Tout"
+
+                regdate_val = lbc_params_dict.get("regdate")
+
+                if regdate_val and str(regdate_val).strip():
+                    return str(regdate_val).strip()
+
+                min_y = lbc_params_dict.get("min_year")
+                max_y = lbc_params_dict.get("max_year")
+                if min_y and max_y:
+                    return f"{min_y}-{max_y}"
+                if min_y:
+                    return f"> {min_y}"
+                if max_y:
+                    return f"< {max_y}"
+
+                return "Tout"
+
+            # Utilisation de la colonne 'lbc_params' pour l'extraction
+            df_searches["Année"] = df_searches["lbc_params"].apply(
+                get_year_display)
+
+            df_searches = df_searches[["name", "id", "Année",
+                                       "last_run_at", "Whitelist", "Blacklist"]]
+
+        return status_counts, df_ads, df_searches
+
+    except Exception as e:
+        logger.exeption(f"Erreur Data Loader: {e}")
+        return {"ACTIVE": 0}, pd.DataFrame(), pd.DataFrame()
+    finally:
+        session.close()
+
+
+@st.cache_data(ttl=10)
+def load_search_details_data(search_id):
+    """Charge les données détaillées pour une recherche spécifique, incluant toutes les annonces (peu importe le statut) et le R²."""
+    db = DatabaseClient()
+    session = db.Session()
+
+    try:
+        # 1. Récupérer l'objet de recherche pour le R²
+        search_obj = SearchManager.get_search(search_id)
+        # Assurer la lecture du R²
+        if search_obj:
+            # On utilise .get() pour accéder aux clés du dictionnaire de manière sécurisée
+            model_meta = search_obj.get("model_meta", {})
+            r2_score = model_meta.get("r2_score", "N/A")
+            search_name = search_obj.get("name", "Recherche Inconnue")
+        else:
+            r2_score = "N/A"
+            search_name = "Recherche Inconnue"
+
+        # 2. Récupérer toutes les annonces liées à cette recherche
+        query_ads = session.query(Ad).filter(
+            Ad.found_by_searches.contains([search_id]))
+
+        # Récupération des POIDS FRACTIONNELS (0.5, 0.3, 0.2)
+        weights_dict = SCORING_CONFIG.get("weights", {})
+        w_deal = weights_dict.get("deal", 0.5)
+        w_conf = weights_dict.get("conf", 0.3)
+        w_prod = weights_dict.get("prod", 0.2)
+
+        raw_data = []
+
+        for ad in query_ads.all():
+            scores = ad.scores or {}
+            base = scores.get("base", {})
+            fin = scores.get("financial", {})
+            sanity = scores.get("sanity_checks", {})
+
+            # Déterminer le statut final pour le graphique
+            status = ad.status
+            if ad.user_status == "SCAM_MANUAL" or status == "SCAM":
+                status = "SCAM"
+            elif status == "SOLD":
+                status = "SOLD"
+            else:
+                status = "ACTIVE"
+
+            # A. CALCUL GAIN/PERTE
+            market_price = fin.get("market_estimation", 0)
+            if market_price and market_price > 0:
+                virtual_price = fin.get("virtual_price", ad.price)
+                gain = market_price - virtual_price
+            else:
+                gain = 0
+
+            # B. CALCUL NOTE BRUTE
+            s_deal = base.get("deal", 50)
+            s_conf = base.get("conf", 50)
+            s_prod = base.get("prod", 0)
+
+            try:
+                # Somme Pondérée Directe (Base de la Note Finale)
+                note_brute = (s_deal * w_deal) + \
+                    (s_conf * w_conf) + (s_prod * w_prod)
+            except:
+                note_brute = 0
+
+            # C. CALCUL INDICE K (K Final)
+            k_meca = sanity.get("k_meca", 1.0)
+            k_modif = sanity.get("k_modif", 1.0)
+            k_arnaque = sanity.get("k_arnaque", 1.0)
+            k_final = k_meca * k_modif * k_arnaque
+
+            raw_data.append({
+                "ID": ad.id,
+                "Titre": ad.title,
+                "Prix": ad.price,
+                "Gain": gain,
+                "Kilométrage": ad.mileage,
+                "Année": ad.year,
+                "Statut": status,  # Statut pour les filtres et graphiques
+                "Note Brute": int(note_brute),
+                "Indice K": int(k_final * 100),
+                # Le score total inclut l'application des K
+                "Score Final": scores.get("total", 0),
+                "Favori": ad.is_favorite,
+                "URL": ad.url,
+                # Détails pour le Hover Plot
+                "Deal Score": s_deal,
+                "Conf Score": s_conf,
+                "Prod Score": s_prod,
+                "K Mecanique": k_meca,
+                "K Modification": k_modif,
+                "K Arnaque": k_arnaque,
+            })
+
+        df_ads = pd.DataFrame(raw_data)
+
+        # S'assurer que les colonnes sont numériques pour les graphiques
+        if not df_ads.empty:
+            df_ads["Prix"] = df_ads["Prix"].astype(float)
+            df_ads["Kilométrage"] = df_ads["Kilométrage"].astype(float)
+
+        # Calculer le count status pour le Pie Chart
+        status_counts = df_ads["Statut"].value_counts().to_dict()
+
+        return search_name, r2_score, status_counts, df_ads
+
+    except Exception as e:
+        logger.exeption(f"Erreur Load Search Details: {e}")
+        return "Erreur de Chargement", "N/A", {"ACTIVE": 0}, pd.DataFrame()
+    finally:
+        session.close()
+
+
+@st.cache_data(ttl=load_app_config().streamlit.cache_ttl_seconds)
+def load_ad_details_data(ad_id: str):
+    db = DatabaseClient()
+    return db.fetch_ad_details(ad_id)
+
+
+@st.cache_data(ttl=load_app_config().streamlit.cache_ttl_seconds)
+def load_ads_selector(limit: int = 200):
+    """
+    Retourne une liste d'annonces pour le sélecteur de la page Details Ads.
+    """
+    db = DatabaseClient()
+    return db.list_ads_for_selector(limit=limit)
+
+
+def load_logs(lines=200):
+    log_file = "logs/worker.log"
+    if os.path.exists(log_file):
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            return "".join(f.readlines()[-lines:])
+    return "Aucun log disponible."
+
+
+==================================================
+FILE_PATH: frontend\layout.py
+==================================================
+from pathlib import Path
+import streamlit as st
+from streamlit_option_menu import option_menu
+
+
+def _safe_switch_page(path: str):
+    # Streamlit attend un chemin relatif type "pages/xxx.py" ou "dashboard.py"
+    if Path(path).exists():
+        st.switch_page(path)
+    else:
+        st.warning(f"Page indisponible pour le moment : `{path}`")
+
+
+def render_header(current_page: str):
+    """
+    Affiche le menu de navigation horizontal et gère la redirection
+    si la page sélectionnée dans le menu n'est pas la page courante.
+    """
+    # 1. Masquer la sidebar native
+    st.markdown("""
+        <style>
+            [data-testid="stSidebarNav"] {display: none;}
+        </style>
+    """, unsafe_allow_html=True)
+
+    # 2. Détermination de l'index par défaut (pour que l'onglet actuel soit mis en surbrillance)
+    options = ["Home", "Details Searches",
+               "Details Ads", "Searches Manager", "Settings"]
+    try:
+        default_index = options.index(current_page)
+    except ValueError:
+        default_index = 0  # Par défaut sur Home si la page n'est pas reconnue
+
+    # 3. Affichage du Menu
+    selected = option_menu(
+        menu_title=None,
+        options=options,  # Doit être une LISTE
+        icons=['house', 'search', 'file-earmark-text',
+               'sliders', 'gear'],  # Doit être une LISTE
+        menu_icon="cast",
+        default_index=default_index,  # Index par défaut
+        orientation="horizontal",
+        styles={
+            "container": {"padding": "5px", "background-color": "#fafafa"},
+            "icon": {"color": "#ff4b4b", "font-size": "18px"},
+            "nav-link": {"font-size": "14px", "text-align": "center", "margin": "2px"},
+            "nav-link-selected": {"background-color": "#ff4b4b", "color": "white"},
+        }  # Doit être un DICTIONNAIRE
+    )
+
+    # 4. Navigation conditionnelle (empêche la boucle infinie)
+    if selected == "Details Searches" and current_page != "Details Searches":
+        _safe_switch_page("pages/1_🔍_Details_Searches.py")
+    elif selected == "Details Ads" and current_page != "Details Ads":
+        _safe_switch_page("pages/2_📄_Details_Ads.py")
+    elif selected == "Searches Manager" and current_page != "Searches Manager":
+        _safe_switch_page("pages/3_🎛️_Searches_Manager.py")
+    elif selected == "Settings" and current_page != "Settings":
+        _safe_switch_page("pages/4_⚙️_Settings.py")
+    elif selected == "Home" and current_page != "Home":
+        _safe_switch_page("dashboard.py")
+
+    return selected
+
+
+==================================================
+FILE_PATH: frontend\__init__.py
+==================================================
+
+
+==================================================
+FILE_PATH: pages\1_🔍_Details_Searches.py
+==================================================
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from frontend.layout import render_header
+from frontend.data_loader import load_search_details_data
+from core.search_manager import SearchManager
+
+# 0. CONFIG & HEADER
+st.set_page_config(page_title="LBC Hunter - Analyse Recherche",
+                   page_icon="🔍", layout="wide")
+render_header("Details Searches")
+
+# --- HANDLER DE NAVIGATION ---
+
+
+def request_nav(page_path: str, **state_updates):
+    """Demande une navigation. À exécuter dans le flux principal, pas dans un callback."""
+    for k, v in state_updates.items():
+        st.session_state[k] = v
+    st.session_state["_nav_target"] = page_path
+
+
+def consume_nav():
+    """Exécute la navigation demandée (si présente) puis nettoie."""
+    target = st.session_state.pop("_nav_target", None)
+    if target:
+        st.switch_page(target)
+
+
+def handle_ad_click_details(df_key: str, selection: dict | None):
+    """Prépare la navigation vers Details Ads (sans switch_page dans le callback)."""
+    selected_ad_id = None
+
+    # 1) Clic Plotly
+    if selection and selection.get("points"):
+        point_index = selection["points"][0]["pointIndex"]
+        selected_ad_id = st.session_state[df_key].iloc[point_index]["ID"]
+
+    # 2) Clic Table
+    elif selection and selection.get("rows"):
+        idx = selection["rows"][0]
+        selected_ad_id = st.session_state[df_key].iloc[idx]["ID"]
+
+    if selected_ad_id:
+        request_nav("pages/2_📄_Details_Ads.py", selected_ad_id=selected_ad_id)
+
+
+# =============================================================================
+# 1. SÉLECTION DE LA RECHERCHE
+# =============================================================================
+searches_list = SearchManager.list_searches()
+search_options = {s["name"]: s["id"] for s in searches_list}
+search_names = list(search_options.keys())
+
+# Gestion de l'état si on vient de la Home ou par défaut
+initial_search_id = st.session_state.get("selected_search_id")
+initial_index = 0
+if initial_search_id and initial_search_id in search_options.values():
+    try:
+        initial_search_name = next(
+            name for name, id_ in search_options.items() if id_ == initial_search_id)
+        initial_index = search_names.index(initial_search_name)
+    except StopIteration:
+        pass
+
+# Sélecteur de recherche
+selected_name = st.selectbox(
+    "Recherche Analysée :",
+    options=search_names,
+    index=initial_index,
+    key="search_selector"
+)
+selected_id = search_options.get(selected_name)
+st.session_state["selected_search_id"] = selected_id
+
+st.title(f"🔍 Analyse Détaillée : {selected_name}")
+
+# =============================================================================
+# 2. CHARGEMENT DES DONNÉES
+# =============================================================================
+
+if not selected_id:
+    st.info("Sélectionnez une recherche pour afficher les détails.")
+    st.stop()
+
+# Chargement de toutes les annonces de la recherche (y compris Sold/Scam)
+search_name, r2_score, status_counts, df_ads = load_search_details_data(
+    selected_id)
+
+if df_ads.empty:
+    st.info(f"Aucune annonce trouvée pour la recherche '{selected_name}'.")
+    st.stop()
+
+# Stockage du DataFrame complet pour les handlers de clic
+st.session_state["df_details_search"] = df_ads
+
+
+# =============================================================================
+# 3. KPIS & PIE CHART
+# =============================================================================
+
+col_kpis_1, col_kpis_2, col_kpis_3, col_kpis_4 = st.columns(4)
+
+with col_kpis_1:
+    st.metric("Total Annonces", len(df_ads))
+
+with col_kpis_2:
+    r2_display = f"{float(r2_score):.2f}" if isinstance(
+        r2_score, (int, float)) else r2_score
+    st.metric("R² Modèle Prix", r2_display,
+              help="Coefficient de détermination R² de la dernière régression du Price Engine.")
+
+with col_kpis_3:
+    active_ads = df_ads[df_ads["Statut"] == "ACTIVE"]
+    if not active_ads.empty:
+        best_deal = active_ads.sort_values(
+            by="Score Final", ascending=False).iloc[0]
+        st.metric("Meilleure Note", f"{best_deal['Score Final']:.1f}",
+                  help=f"Annonce: {best_deal['Titre']} ({best_deal['Gain']:+.0f} €)")
+    else:
+        st.metric("Meilleure Note", "N/A")
+
+with col_kpis_4:
+    # PIE CHART (Répartition par Statut)
+    df_status = pd.DataFrame(list(status_counts.items()),
+                             columns=["Statut", "Count"])
+    df_status = df_status[df_status["Count"] > 0]
+
+    fig_pie = px.pie(df_status, values='Count', names='Statut', hole=0.5,
+                     color='Statut',
+                     color_discrete_map={'ACTIVE': '#4CAF50', 'SOLD': '#9E9E9E', 'SCAM': '#000000'})
+    fig_pie.update_layout(
+        margin=dict(t=0, b=0, l=0, r=0),
+        height=150,
+        showlegend=False
+    )
+    st.plotly_chart(fig_pie, use_container_width=True)
+
+
+st.divider()
+
+# =============================================================================
+# 4. SCATTER PLOT (Kilométrage vs Prix vs Score)
+# =============================================================================
+
+st.subheader("📈 Carte du Marché (Prix vs Kilométrage)")
+
+# Création du texte d'info au survol (Hover Text)
+df_ads['Hover Text'] = df_ads.apply(
+    lambda row: (
+        f"<b>{row['Titre']}</b><br>"
+        f"Prix: {row['Prix']:,.0f} €<br>"
+        f"Kilométrage: {row['Kilométrage']:,.0f} km<br>"
+        f"Statut: {row['Statut']}<br>"
+        f"--- Calcul Score ---<br>"
+        f"Note Brute: {row['Note Brute']:.0f}<br>"
+        f"Deal/Conf/Prod: {row['Deal Score']:.0f}/{row['Conf Score']:.0f}/{row['Prod Score']:.0f}<br>"
+        f"Indice K: {row['Indice K']:.0f}% ({row['K Mecanique']:.1f}x / {row['K Modification']:.1f}x / {row['K Arnaque']:.1f}x)<br>"
+        f"<b>Score Final: {row['Score Final']:.1f}</b>"
+    ), axis=1
+)
+
+# Configuration des symboles (Formes)
+symbol_map = {
+    'ACTIVE': 'circle',  # Rond
+    'SOLD': 'x',         # Croix
+    'SCAM': 'square'     # Carré
+}
+
+# --- CRÉATION DU GRAPHE AVEC LOGIQUE DE COULEUR COMPLEXE ---
+fig_scatter = go.Figure()
+
+# Couleurs fixes pour SOLD (Gris) et SCAM (Noir)
+STATUS_COLORS = {'SOLD': '#9E9E9E', 'SCAM': '#000000'}
+
+# Ajout des annonces SOLD et SCAM (couleur et forme fixes, sans gradient)
+for status, color in STATUS_COLORS.items():
+    subset = df_ads[df_ads["Statut"] == status]
+    if not subset.empty:
+        fig_scatter.add_trace(go.Scatter(
+            x=subset["Kilométrage"],
+            y=subset["Prix"],
+            mode='markers',
+            name=f"Annonces {status}",
+            marker=dict(
+                size=12,
+                color=color,
+                symbol=symbol_map[status],
+                line=dict(width=1, color='DarkSlateGrey'),
+            ),
+            text=subset['Hover Text'],  # Texte pour le survol
+            hovertemplate='%{text}<extra></extra>'
+        ))
+
+# Ajout des annonces ACTIVE (forme fixe, couleur en gradient selon le Score Final)
+subset_active = df_ads[df_ads["Statut"] == 'ACTIVE']
+if not subset_active.empty:
+    fig_scatter.add_trace(go.Scatter(
+        x=subset_active["Kilométrage"],
+        y=subset_active["Prix"],
+        mode='markers',
+        name="Annonces Actives",
+        marker=dict(
+            size=12,
+            symbol=symbol_map['ACTIVE'],
+            line=dict(width=1, color='DarkSlateGrey'),
+            # GRADIENT ROUGE (0) -> VERT (100) basé sur le score final
+            color=subset_active['Score Final'],
+            colorscale=[[0, 'red'], [0.5, 'yellow'], [1, 'green']],
+            cmin=0,
+            cmax=100,
+            colorbar=dict(title="Score Final", tickvals=[0, 50, 100], ticktext=[
+                          "0 (Rouge)", "50 (Jaune)", "100 (Vert)"])
+        ),
+        text=subset_active['Hover Text'],
+        hovertemplate='%{text}<extra></extra>'
+    ))
+
+fig_scatter.update_layout(
+    xaxis_title="Kilométrage (km)",
+    yaxis_title="Prix (€)",
+    height=600,
+    hovermode="closest",
+    legend=dict(orientation="h", yanchor="bottom",
+                y=1.02, xanchor="right", x=1)
+)
+
+# Affichage du graphique avec gestion du clic
+st.plotly_chart(
+    fig_scatter,
+    use_container_width=True,
+    on_select=lambda selection: handle_ad_click_details(
+        "df_details_search", selection),
+    selection_mode='points'
+)
+
+
+# =============================================================================
+# 5. TABLEAU DE DONNÉES
+# =============================================================================
+
+st.subheader("Liste Complète des Annonces")
+
+# Configuration des colonnes
+ads_column_config = {
+    "Titre": st.column_config.TextColumn("Annonce", width="large"),
+    "Prix": st.column_config.NumberColumn("Prix (€)", format="%.0f €"),
+    "Kilométrage": st.column_config.NumberColumn("Km", format="%.0f"),
+    "Statut": st.column_config.TextColumn("Statut", width="small"),
+    # La colonne Gain/Perte est gérée par le Pandas Styler pour la couleur du texte
+    "Gain": st.column_config.TextColumn("Gain/Perte", width="small"),
+    "Score Final": st.column_config.ProgressColumn("Note Finale", min_value=0, max_value=100, format="%.1f"),
+
+    # Colonnes masquées
+    "ID": None, "Année": None, "Favori": None, "URL": None, "Deal Score": None, "Conf Score": None, "Prod Score": None,
+    "K Mecanique": None, "K Modification": None, "K Arnaque": None, "Note Brute": None, "Indice K": None
+}
+
+# Fonction de style pour la table (Couleur Rouge/Vert sur Gain/Perte)
+
+
+def get_styled_dataframe_details(df_in):
+    if df_in.empty:
+        return df_in
+
+    styler = df_in.style.format({
+        "Prix": "{:.0f} €",
+        "Gain": "{:+.0f} €",
+        "Kilométrage": "{:.0f}",
+        "Score Final": "{:.1f}"
+    }).map(
+        lambda v: f'color: {"#4CAF50" if v > 0 else "#F44336"}; font-weight: bold;',
+        subset=['Gain']
+    )
+    return styler
+
+
+df_sorted = df_ads.sort_values(
+    by="Score Final", ascending=False).reset_index(drop=True)
+st.session_state["df_details_search_sorted"] = df_sorted
+
+TABLE_KEY = "details_ads_table"
+
+st.dataframe(
+    get_styled_dataframe_details(df_sorted),
+    column_config=ads_column_config,
+    use_container_width=True,
+    hide_index=True,
+    selection_mode="single-row",
+    key=TABLE_KEY,
+    on_select=lambda: handle_ad_click_details(
+        "df_details_search_sorted",
+        st.session_state[TABLE_KEY].selection
+    ),
+)
+
+consume_nav()
+
+
+==================================================
+FILE_PATH: pages\2_📄_Details_Ads.py
+==================================================
+# pages/2_📄_Details_Ads.py
+
+import streamlit as st
+
+# ----------------------------------------------------------------------
+# ⚠️ Streamlit requirement: MUST be first executed statement in the page
+# ----------------------------------------------------------------------
+st.set_page_config(page_title="LBC Hunter - Fiche Annonce",
+                   page_icon="📄", layout="wide")
+
+
+def main():
+    import pandas as pd
+    import plotly.graph_objects as go
+    from datetime import datetime
+
+    from frontend.layout import render_header
+    from frontend.data_loader import load_ad_details_data, load_ads_selector
+    from core.db_client import DatabaseClient
+
+    # Service re-scan (alive + IA + scoring)
+    from core.rescan_service import rescan_ad
+
+    render_header("Details Ads")
+
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+    def fmt_dt(d) -> str:
+        if not d:
+            return "—"
+        try:
+            return d.strftime("%d/%m/%Y %H:%M")
+        except Exception:
+            return str(d)
+
+    def safe_get(d: dict, path: str, default="—"):
+        """
+        path: "a.b.c"
+        """
+        cur = d
+        for p in path.split("."):
+            if not isinstance(cur, dict) or p not in cur:
+                return default
+            cur = cur[p]
+        return cur if cur is not None else default
+
+    def build_price_history_chart(ad: dict):
+        history = ad.get("price_history") or []
+        points = []
+
+        # historique: [{"date": "...iso...", "price": 12345}, ...]
+        for h in history:
+            dt = h.get("date")
+            price = h.get("price")
+            if not dt or price is None:
+                continue
+            try:
+                points.append(
+                    {"date": pd.to_datetime(dt), "price": float(price)})
+            except Exception:
+                pass
+
+        # point courant
+        try:
+            last_seen = ad.get("last_seen_at") or datetime.now()
+            points.append(
+                {"date": pd.to_datetime(last_seen), "price": float(
+                    ad.get("price") or 0)}
+            )
+        except Exception:
+            pass
+
+        if not points:
+            return None
+
+        df = pd.DataFrame(points).sort_values("date")
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=df["date"],
+                y=df["price"],
+                mode="lines+markers",
+                name="Prix",
+            )
+        )
+        fig.update_layout(
+            height=320,
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis_title="Date",
+            yaxis_title="Prix (€)",
+        )
+        return fig
+
+    def severity_progress(label: str, value_0_1: float):
+        """
+        Affiche une barre de 'pénalité' en % à partir d'un ratio 0..1.
+        Ici on attend généralement (1-k) quand on part d'un K (0..1).
+        """
+        try:
+            v = float(value_0_1)
+        except Exception:
+            v = 0.0
+        v = max(0.0, min(1.0, v))
+        pct = int(v * 100)
+        st.progress(pct, text=f"{label} — {pct}%")
+
+    def render_ai_list(title: str, items: list, max_items: int = 12):
+        st.markdown(f"**{title}**")
+        if not items:
+            st.caption("—")
+            return
+        for it in items[:max_items]:
+            nom = it.get("nom") or it.get("item") or "—"
+            sev = it.get("severity")
+            if sev is None:
+                st.write(f"- {nom}")
+            else:
+                try:
+                    st.write(f"- {nom} (severity={float(sev):.2f})")
+                except Exception:
+                    st.write(f"- {nom}")
+
+    # -------------------------------------------------------------------------
+    # 1) Sélecteur d'annonce (toujours visible)
+    # -------------------------------------------------------------------------
+    rows = load_ads_selector(limit=250)
+
+    options = {}
+    default_index = 0
+
+    if rows:
+        labels = []
+        for r in rows:
+            label = (
+                f"{(r.get('title') or '—')[:60]} | {r.get('price','—')}€ | "
+                f"{r.get('status','—')} | {r.get('id')}"
+            )
+            labels.append(label)
+            options[label] = r["id"]
+
+        current_id = st.session_state.get("selected_ad_id")
+
+        # Calcule l'index par défaut si on vient d'un clic (Home / Search details)
+        if current_id:
+            try:
+                current_label = next(
+                    k for k, v in options.items() if v == current_id)
+                default_index = labels.index(current_label)
+            except StopIteration:
+                default_index = 0
+
+        selected_label = st.selectbox(
+            "Annonce (navigation)",
+            labels,
+            index=default_index,
+            key="ad_nav_selector",
+        )
+
+        selected_id = options[selected_label]
+        if st.session_state.get("selected_ad_id") != selected_id:
+            st.session_state["selected_ad_id"] = selected_id
+            # rerun OK ici (pas dans callback)
+            st.rerun()
+    else:
+        st.warning("Aucune annonce disponible (ou toutes sont TRASH).")
+        st.stop()
+
+    ad_id = st.session_state.get("selected_ad_id")
+
+    # -------------------------------------------------------------------------
+    # 2) Load details
+    # -------------------------------------------------------------------------
+    ad = load_ad_details_data(ad_id)
+    if not ad:
+        st.error(f"Annonce introuvable en base: {ad_id}")
+        st.stop()
+
+    # -------------------------------------------------------------------------
+    # 3) HEADER
+    # -------------------------------------------------------------------------
+    col_h1, col_h2 = st.columns([4, 1], vertical_alignment="center")
+    with col_h1:
+        st.title(ad.get("title") or f"Annonce {ad_id}")
+        st.caption(f"ID LBC: `{ad_id}`")
+    with col_h2:
+        if ad.get("url"):
+            st.link_button("🔗 Ouvrir sur LBC",
+                           ad["url"], use_container_width=True)
+
+    st.divider()
+
+    # -------------------------------------------------------------------------
+    # 4) AI SUMMARY
+    # -------------------------------------------------------------------------
+    summary = safe_get(ad, "ai_analysis.summary", default=None)
+    with st.container(border=True):
+        st.subheader("🧠 AI Summary")
+        if summary:
+            st.write(summary)
+        else:
+            st.info("Pas encore d'analyse IA disponible pour cette annonce.")
+
+    # -------------------------------------------------------------------------
+    # 5) Infos clés / Vendeur / Véhicule
+    # -------------------------------------------------------------------------
+    c1, c2, c3 = st.columns([1.2, 1.2, 1.6])
+
+    with c1:
+        with st.container(border=True):
+            st.subheader("📌 Infos clés")
+            st.write(f"**Statut robot:** {ad.get('status') or '—'}")
+            st.write(f"**Statut user:** {ad.get('user_status') or '—'}")
+            st.write(f"**Publication:** {fmt_dt(ad.get('publication_date'))}")
+            st.write(f"**First seen:** {fmt_dt(ad.get('first_seen_at'))}")
+            st.write(f"**Last seen:** {fmt_dt(ad.get('last_seen_at'))}")
+            st.write(
+                f"**Favori:** {'❤️ Oui' if ad.get('is_favorite') else '—'}")
+
+    with c2:
+        with st.container(border=True):
+            st.subheader("🧑‍💼 Vendeur")
+            rating = ad.get("seller_rating")
+            count = ad.get("seller_rating_count")
+            st.write(f"**Note:** {rating if rating is not None else '—'}")
+            st.write(f"**Avis:** {count if count is not None else '—'}")
+            st.caption(
+                "ℹ️ Le nom vendeur n'est pas disponible dans les données actuelles.")
+
+    with c3:
+        with st.container(border=True):
+            st.subheader("🚗 Véhicule")
+            st.write(
+                f"**Prix:** {ad.get('price') if ad.get('price') is not None else '—'} €")
+            st.write(
+                f"**CP:** {ad.get('zipcode') or '—'} | **Ville:** {ad.get('location') or '—'}")
+            st.write(
+                f"**Année:** {ad.get('year') or '—'} | **Km:** {ad.get('mileage') or '—'}")
+            st.write(
+                f"**Carburant:** {ad.get('fuel') or '—'} | **Boîte:** {ad.get('gearbox') or '—'}")
+            st.write(
+                f"**Puissance:** {ad.get('horsepower') or '—'} | **Finition:** {ad.get('finition') or '—'}")
+
+    # -------------------------------------------------------------------------
+    # 6) ANALYSE PRIX (avant évaluation)
+    # -------------------------------------------------------------------------
+    st.divider()
+    st.subheader("📈 Analyse Prix")
+
+    fig = build_price_history_chart(ad)
+    if fig is None:
+        st.info("Pas d'historique de prix disponible pour cette annonce.")
+    else:
+        st.plotly_chart(fig, use_container_width=True)
+
+    # -------------------------------------------------------------------------
+    # 7) ÉVALUATION (scores + K + points IA)
+    # -------------------------------------------------------------------------
+    st.divider()
+    st.subheader("🧮 Évaluation & Détail du scoring")
+
+    scores = ad.get("scores") or {}
+    base = scores.get("base", {}) if isinstance(scores, dict) else {}
+    sanity = scores.get("sanity_checks", {}) if isinstance(
+        scores, dict) else {}
+    financial = scores.get("financial", {}) if isinstance(scores, dict) else {}
+
+    col_s1, col_s2 = st.columns([1.2, 1.8])
+
+    with col_s1:
+        with st.container(border=True):
+            st.markdown("### Score (piliers)")
+            deal = base.get("deal", 50)
+            conf = base.get("conf", 50)
+            prod = base.get("prod", 0)
+            total = scores.get("total", None)
+
+            st.metric("Score Final", f"{total:.1f}" if isinstance(
+                total, (int, float)) else "—")
+
+            st.write("**Deal**")
+            st.progress(int(deal), text=f"{int(deal)}/100")
+
+            st.write("**Confiance**")
+            st.progress(int(conf), text=f"{int(conf)}/100")
+
+            st.write("**Produit**")
+            st.progress(int(prod), text=f"{int(prod)}/100")
+
+    with col_s2:
+        with st.container(border=True):
+            st.markdown("### Coefficients K + explications")
+            k_meca = sanity.get("k_meca", 1.0)
+            k_modif = sanity.get("k_modif", 1.0)
+            k_arnaque = sanity.get("k_arnaque", 1.0)
+
+            st.write("**K Mécanique**")
+            severity_progress("Pénalité", 1.0 - float(k_meca or 1.0))
+
+            st.write("**K Modifications**")
+            severity_progress("Pénalité", 1.0 - float(k_modif or 1.0))
+
+            st.write("**K Arnaque**")
+            severity_progress("Pénalité", 1.0 - float(k_arnaque or 1.0))
+
+            ai = ad.get("ai_analysis") or {}
+            risques = ai.get("risques_meca", []) if isinstance(
+                ai, dict) else []
+            modifs = ai.get("modifications", []) if isinstance(
+                ai, dict) else []
+            scams = ai.get("indices_arnaque", []) if isinstance(
+                ai, dict) else []
+
+            render_ai_list("🛠️ Risques mécaniques", risques)
+            render_ai_list("🔧 Modifications", modifs)
+            render_ai_list("🕵️ Indices d’arnaque", scams)
+
+    # -------------------------------------------------------------------------
+    # 8) ESTIMATION ÉCONOMIQUE
+    # -------------------------------------------------------------------------
+    st.divider()
+    st.subheader("💰 Estimation économique")
+
+    posted = financial.get("posted_price", ad.get("price"))
+    virtual = financial.get("virtual_price", ad.get("price"))
+    repair = financial.get("repair_cost", 0)
+    market = financial.get("market_estimation", None)
+
+    col_e1, col_e2, col_e3, col_e4 = st.columns(4)
+    col_e1.metric("Prix annonce", f"{posted} €" if posted is not None else "—")
+    col_e2.metric("Coût réparations",
+                  f"{repair} €" if repair is not None else "—")
+    col_e3.metric("Prix virtuel",
+                  f"{virtual} €" if virtual is not None else "—")
+    col_e4.metric("Cote marché", f"{market} €" if market is not None else "—")
+
+    gain = None
+    if isinstance(market, (int, float)) and market > 0 and isinstance(virtual, (int, float)):
+        gain = int(market - virtual)
+
+    st.metric("Gain / Perte", f"{gain:+d} €" if gain is not None else "—")
+
+    # -------------------------------------------------------------------------
+    # 9) ACTIONS
+    # -------------------------------------------------------------------------
+    st.divider()
+    st.subheader("⚙️ Actions")
+
+    db = DatabaseClient()
+
+    a1, a2, a3 = st.columns([1, 1, 2])
+
+    with a1:
+        fav_label = "❤️ Unfav" if ad.get("is_favorite") else "🤍 Favori"
+        if st.button(fav_label, use_container_width=True):
+            db.set_favorite(ad_id, not bool(ad.get("is_favorite")))
+            load_ad_details_data.clear()
+            st.rerun()
+
+    with a2:
+        if st.button("🗑️ Exclure (TRASH)", use_container_width=True):
+            db.set_user_status(ad_id, "TRASH")
+            load_ad_details_data.clear()
+            st.rerun()
+
+    with a3:
+        if st.button("🔄 Re-scan (alive + IA + scoring)", use_container_width=True):
+            with st.spinner("Re-scan en cours…"):
+                res = rescan_ad(ad_id)
+
+            if not res.get("ok"):
+                st.error(f"Re-scan impossible: {res.get('reason')}")
+            else:
+                if res.get("reason") == "MARKED_SOLD":
+                    st.warning("Annonce non accessible → marquée SOLD.")
+                else:
+                    st.success("Annonce mise à jour ✅")
+
+            load_ad_details_data.clear()
+            st.rerun()
+
+
+main()
+
+
+==================================================
+FILE_PATH: pages\3_🎛️_Searches_Manager.py
+==================================================
+import streamlit as st
+from frontend.layout import render_header
+from core.search_manager import SearchManager
+
+# -----------------------------------------------------------------------------
+# CONFIG
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="LBC Hunter - Gestion des Recherches",
+    page_icon="🎛️",
+    layout="wide"
+)
+render_header("Searches Manager")
+
+st.title("🎛️ Gestion des Recherches")
+st.caption("Configuration et pilotage des recherches Leboncoin")
+
+# -----------------------------------------------------------------------------
+# DATA
+# -----------------------------------------------------------------------------
+searches = SearchManager.list_searches()
+
+if not searches:
+    st.info("Aucune recherche configurée pour le moment.")
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# TABLE (lecture seule pour l’instant)
+# -----------------------------------------------------------------------------
+st.subheader("📡 Recherches existantes")
+
+st.dataframe(
+    searches,
+    use_container_width=True,
+    hide_index=True
+)
+
+# -----------------------------------------------------------------------------
+# PLACEHOLDER ACTIONS
+# -----------------------------------------------------------------------------
+st.divider()
+st.subheader("🚧 Actions (à venir)")
+
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    st.button("➕ Créer une recherche", disabled=True)
+
+with col2:
+    st.button("✏️ Modifier", disabled=True)
+
+with col3:
+    st.button("⏸️ Activer / Désactiver", disabled=True)
+
+with col4:
+    st.button("▶️ Lancer un scan", disabled=True)
+
+st.info(
+    "Cette page est un **placeholder fonctionnel**.\n\n"
+    "Les actions seront activées lors du P1 :\n"
+    "- création / édition de recherches\n"
+    "- activation/désactivation\n"
+    "- déclenchement manuel du worker"
+)
+
+
+==================================================
+FILE_PATH: pages\4_⚙️_Settings.py
+==================================================
+import streamlit as st
+from frontend.layout import render_header
+
+# -----------------------------------------------------------------------------
+# CONFIG
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="LBC Hunter - Paramètres",
+    page_icon="⚙️",
+    layout="wide"
+)
+render_header("Settings")
+
+st.title("⚙️ Paramètres")
+st.caption("Configuration globale de LBC Hunter")
+
+# -----------------------------------------------------------------------------
+# WARNING
+# -----------------------------------------------------------------------------
+st.warning(
+    "⚠️ Cette page est un **placeholder**.\n\n"
+    "À terme, **tous les paramètres de l'application** "
+    "(scoring, IA, scraping, performance, sécurité) "
+    "seront centralisés ici."
+)
+
+# -----------------------------------------------------------------------------
+# SECTIONS (structure cible)
+# -----------------------------------------------------------------------------
+with st.expander("🧠 Intelligence Artificielle", expanded=False):
+    st.markdown("""
+    **À venir :**
+    - activation / désactivation de l’IA
+    - seuils de sévérité (mécanique, modifications, arnaque)
+    - paramètres du modèle Gemini
+    """)
+
+with st.expander("📊 Scoring & Pondérations", expanded=False):
+    st.markdown("""
+    **À venir :**
+    - poids Deal / Confiance / Produit
+    - règles de veto (annonces exclues du marché)
+    - seuils de pénalité / bonus
+    """)
+
+with st.expander("🌐 Scraping & Réseau", expanded=False):
+    st.markdown("""
+    **À venir :**
+    - délais min / max
+    - timeouts
+    - user-agents
+    - fréquence des scans
+    """)
+
+with st.expander("⚡ Performance & Cache", expanded=False):
+    st.markdown("""
+    **À venir :**
+    - TTL du cache Streamlit
+    - pagination / limites UI
+    - stratégie de rafraîchissement
+    """)
+
+with st.expander("🔐 Sécurité & Secrets", expanded=False):
+    st.markdown("""
+    **À venir :**
+    - état des clés API
+    - configuration DB (lecture seule)
+    - avertissements sécurité
+    """)
+
+# -----------------------------------------------------------------------------
+# FOOTER
+# -----------------------------------------------------------------------------
+st.info(
+    "🎯 Objectif P1 :\n"
+    "- une **config unique** (dataclass / pydantic)\n"
+    "- persistée (JSON)\n"
+    "- modifiable ici via l’UI\n"
+    "- sans **aucune** valeur codée en dur ailleurs"
+)
+
+
+==================================================
+FILE_PATH: searches\ford_focus_rs_mk2_d59147d7-669e-4e8c-9bfc-c461c18beb4a.json
+==================================================
+{
+    "id": "d59147d7-669e-4e8c-9bfc-c461c18beb4a",
+    "name": "Ford Focus RS MK2",
+    "active": true,
+    "created_at": "2025-12-14T01:20:16.470833",
+    "last_run_at": "2025-12-14T23:07:08.150615",
+    "lbc_params": {
+        "category": "2",
+        "text": "focus rs",
+        "sort": "time",
+        "regdate": "2009-2011",
+        "price": "500-max"
+    },
+    "filters": {
+        "whitelist": [
+            "mk2",
+            "305",
+            "2.5",
+            "500",
+            "5 cylindres"
+        ],
+        "blacklist": [
+            "mk1",
+            "mk3",
+            "st",
+            "st225",
+            "diesel",
+            "tdci",
+            "titanium",
+            "ghia",
+            "trend",
+            "ecoboost",
+            "2.3",
+            "2.0",
+            "1.6",
+            "look rs",
+            "kit rs",
+            "replica",
+            "pack rs",
+            "jante",
+            "piece",
+            "recherche",
+            "demande",
+            "accident",
+            "export",
+            "ligne"
+        ]
+    },
+    "model_meta": {
+        "r2_score": 0.9
+    }
+}
+
+==================================================
+FILE_PATH: tools\simulate_k.py
+==================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable, List, Tuple
+
+
+@dataclass(frozen=True)
+class KParams:
+    alpha: float
+    sum_cap: float
+    k_min: float
+
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def clamp01(x: float) -> float:
+    return clamp(x, 0.0, 1.0)
+
+
+def aggregate_k(severities: Iterable[float], p: KParams) -> float:
+    sevs = [clamp01(float(s)) for s in severities]
+    if not sevs:
+        return 1.0
+
+    s_max = max(sevs)
+    s_sum = min(sum(sevs), p.sum_cap)
+
+    penalty = (p.alpha * s_max) + ((1.0 - p.alpha) * s_sum)
+    k = 1.0 - penalty
+    return clamp(k, p.k_min, 1.0)
+
+
+def explain(severities: List[float], p: KParams) -> Tuple[float, dict]:
+    sevs = [clamp01(float(s)) for s in severities]
+    if not sevs:
+        return 1.0, {"s_max": 0.0, "s_sum_capped": 0.0, "penalty": 0.0, "k_raw": 1.0}
+
+    s_max = max(sevs)
+    s_sum = min(sum(sevs), p.sum_cap)
+    penalty = (p.alpha * s_max) + ((1.0 - p.alpha) * s_sum)
+    k_raw = 1.0 - penalty
+    k = clamp(k_raw, p.k_min, 1.0)
+
+    return k, {"s_max": s_max, "s_sum_capped": s_sum, "penalty": penalty, "k_raw": k_raw}
+
+
+def run_scenarios(title: str, p: KParams, scenarios: List[Tuple[str, List[float]]]) -> None:
+    print(f"\n=== {title} ===")
+    print(
+        f"params: alpha={p.alpha:.2f}  sum_cap={p.sum_cap:.2f}  k_min={p.k_min:.2f}\n")
+    for name, sevs in scenarios:
+        k, d = explain(sevs, p)
+        print(
+            f"- {name:<28} sevs={sevs!s:<18} "
+            f"=> k={k:.3f}  (max={d['s_max']:.2f}, sum_cap={d['s_sum_capped']:.2f}, pen={d['penalty']:.2f}, raw={d['k_raw']:.3f})"
+        )
+
+
+if __name__ == "__main__":
+    # 🔧 Mets ici EXACTEMENT les paramètres que tu as dans SCORING_CONFIG["severity"]
+    p_meca = KParams(alpha=0.40, sum_cap=1.00, k_min=0.25)
+    p_modif = KParams(alpha=0.75, sum_cap=0.60, k_min=0.70)
+    p_arnaque = KParams(alpha=0.90, sum_cap=0.40, k_min=0.05)
+
+    # ✅ Scénarios “type” (modifie selon tes cas réels)
+    scenarios_modif = [
+        ("aucune modif", []),
+        ("jantes + teinte (léger)", [0.10, 0.10]),
+        ("3 petites modifs", [0.20, 0.20, 0.20]),
+        ("echappement + ressorts", [0.30, 0.30]),
+        ("stage 1 seul", [0.60]),
+        ("stage1 + 2 légères", [0.60, 0.15, 0.15]),
+        ("stage2+", [0.90]),
+    ]
+
+    scenarios_meca = [
+        ("aucun risque", []),
+        ("entretien courant", [0.10]),
+        ("2 défauts moyens", [0.30, 0.30]),
+        ("embrayage suspect", [0.60]),
+        ("turbo + injecteurs", [0.60, 0.60]),
+        ("critique sécurité", [0.90]),
+    ]
+
+    scenarios_arnaque = [
+        ("aucun indice", []),
+        ("vague / petit doute", [0.10]),
+        ("2 signaux suspects", [0.30, 0.30]),
+        ("acompte demandé", [0.60]),
+        ("mandat cash (gros)", [0.90]),
+        ("plusieurs gros signaux", [0.70, 0.80]),
+    ]
+
+    run_scenarios("K_MODIF", p_modif, scenarios_modif)
+    run_scenarios("K_MECA", p_meca, scenarios_meca)
+    run_scenarios("K_ARNAQUE", p_arnaque, scenarios_arnaque)
+
+    # ✨ Bonus : un petit tableau “sensibilité” sur un pattern fixe
+    print("\n=== Sensibilité rapide (pattern: [0.3,0.3,0.3]) ===")
+    pattern = [0.3, 0.3, 0.3]
+    for alpha in [0.3, 0.5, 0.7, 0.85]:
+        for sum_cap in [0.4, 0.6, 0.8, 1.0]:
+            k = aggregate_k(pattern, KParams(
+                alpha=alpha, sum_cap=sum_cap, k_min=0.0))
+            print(f"alpha={alpha:.2f} sum_cap={sum_cap:.2f} => k={k:.3f}")
+
+
+==================================================
+FILE_PATH: tools\verify_contract.py
+==================================================
+from _bootstrap import PROJECT_ROOT  # noqa: F401
+
+from core.scoring_config import SCORING_CONFIG
+from core.app_config import load_app_config
+
+
+def fail(msg: str):
+    print(f"❌ CONTRACT FAIL: {msg}")
+    sys.exit(1)
+
+
+def ok(msg: str):
+    print(f"✅ {msg}")
+
+
+def check_weights():
+    weights = SCORING_CONFIG.get("weights")
+    if not weights:
+        fail("weights manquants")
+
+    total = sum(weights.values())
+    if abs(total - 1.0) > 1e-6:
+        fail(f"weights somme != 1.0 ({total})")
+
+    for k, v in weights.items():
+        if v < 0:
+            fail(f"weight négatif: {k}")
+
+    ok("weights OK")
+
+
+def check_price_engine():
+    pe = SCORING_CONFIG.get("price_engine", {})
+    scoring = pe.get("scoring", {})
+
+    r_good = scoring.get("good_deal_ratio")
+    r_neutral = scoring.get("neutral_ratio")
+    r_bad = scoring.get("bad_deal_ratio")
+
+    if not (r_good and r_neutral and r_bad):
+        fail("ratios price_engine incomplets")
+
+    if not (r_good < r_neutral < r_bad):
+        fail("ordre ratios invalide (good < neutral < bad)")
+
+    ok("price_engine ratios OK")
+
+
+def check_severity():
+    sev = SCORING_CONFIG.get("severity", {})
+    modif = sev.get("modif", {})
+
+    k_min = modif.get("k_min")
+    k_min_hard = modif.get("k_min_hard")
+    hard_threshold = modif.get("hard_threshold")
+
+    if hard_threshold is not None:
+        if not (0.0 < hard_threshold <= 1.0):
+            fail("hard_threshold hors bornes")
+
+        if k_min_hard > k_min:
+            fail("k_min_hard > k_min (incohérent)")
+
+    ok("severity modif OK")
+
+
+def check_app_config():
+    cfg = load_app_config()
+
+    if cfg.streamlit.cache_ttl_seconds <= 0:
+        fail("STREAMLIT_CACHE_TTL invalide")
+
+    if cfg.worker.gemini_sleep_seconds <= 0:
+        fail("WORKER_GEMINI_SLEEP invalide")
+
+    if cfg.worker.archive_days_threshold < 0:
+        fail("WORKER_ARCHIVE_DAYS invalide")
+
+    ok("AppConfig runtime OK")
+
+
+def main():
+    print("🔍 Vérification contrat white paper...\n")
+
+    check_weights()
+    check_price_engine()
+    check_severity()
+    check_app_config()
+
+    print("\n🎉 CONTRAT OK — aligné white paper")
+
+
+if __name__ == "__main__":
+    main()
+
+
+==================================================
+FILE_PATH: tools\_bootstrap.py
+==================================================
+# tools/_bootstrap.py
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+==================================================
+FILE_PATH: tools\__init__.py
+==================================================
+

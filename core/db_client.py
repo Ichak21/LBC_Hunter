@@ -176,7 +176,7 @@ class DatabaseClient:
 
         except Exception as e:
             logger.exception(f"❌ Erreur nettoyage : {e}")
-            logger.info.rollback()
+            session.rollback()
         finally:
             session.close()
 
@@ -313,6 +313,136 @@ class DatabaseClient:
         except Exception:
             session.rollback()
             raise
+        finally:
+            session.close()
+
+    def get_ad(self, ad_id: str) -> Optional[Ad]:
+        session = self.Session()
+        try:
+            return session.query(Ad).filter_by(id=ad_id).first()
+        finally:
+            session.close()
+
+    def mark_ad_sold(self, ad_id: str) -> bool:
+        session = self.Session()
+        try:
+            ad = session.query(Ad).filter_by(id=ad_id).first()
+            if not ad:
+                return False
+            ad.status = "SOLD"          # on reste aligné avec archive_old_ads
+            ad.last_seen_at = datetime.now()
+            session.commit()
+            return True
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def fetch_ad_details(self, ad_id: str) -> Optional[Dict[str, Any]]:
+        """Retourne une annonce sous forme de dict prêt UI."""
+        session = self.Session()
+        try:
+            ad = session.query(Ad).filter_by(id=ad_id).first()
+            if not ad:
+                return None
+
+            return {
+                "id": ad.id,
+                "url": ad.url,
+                "title": ad.title,
+                "description": ad.description,
+                "price": ad.price,
+                "mileage": ad.mileage,
+                "year": ad.year,
+                "fuel": ad.fuel,
+                "gearbox": ad.gearbox,
+                "horsepower": ad.horsepower,
+                "finition": ad.finition,
+                "location": ad.location,
+                "zipcode": ad.zipcode,
+                "seller_rating": ad.seller_rating,
+                "seller_rating_count": ad.seller_rating_count,
+                "publication_date": ad.publication_date,
+                "first_seen_at": ad.first_seen_at,
+                "last_seen_at": ad.last_seen_at,
+                "status": ad.status,
+                "user_status": ad.user_status,
+                "is_favorite": ad.is_favorite,
+
+                # collections JSONB / ARRAY → jamais dict(...)
+                "found_by_searches": list(ad.found_by_searches or []),
+                "price_history": list(ad.price_history or []),
+
+                # scores & IA peuvent être dict OU None → on renvoie tel quel
+                "scores": ad.scores if ad.scores is not None else {},
+                "ai_analysis": ad.ai_analysis if ad.ai_analysis is not None else {},
+
+                # raw_data peut être list (attributs LBC) OU dict → on renvoie tel quel
+                "raw_data": ad.raw_data if ad.raw_data is not None else {},
+            }
+        finally:
+            session.close()
+
+    def set_favorite(self, ad_id: str, is_favorite: bool) -> bool:
+        session = self.Session()
+        try:
+            ad = session.query(Ad).filter_by(id=ad_id).first()
+            if not ad:
+                return False
+            ad.is_favorite = bool(is_favorite)
+            session.commit()
+            return True
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def set_user_status(self, ad_id: str, user_status: str) -> bool:
+        """user_status: NORMAL | TRASH | SCAM_MANUAL"""
+        session = self.Session()
+        try:
+            ad = session.query(Ad).filter_by(id=ad_id).first()
+            if not ad:
+                return False
+            ad.user_status = user_status
+            session.commit()
+            return True
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def list_ads_for_selector(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """
+        Liste d'annonces pour alimenter le selectbox de la page Details Ads.
+        On exclut TRASH par défaut.
+        """
+        session = self.Session()
+        try:
+            rows = (
+                session.query(
+                    Ad.id, Ad.title, Ad.price, Ad.status, Ad.user_status, Ad.last_seen_at
+                )
+                .filter(Ad.user_status != "TRASH")
+                .order_by(Ad.last_seen_at.desc())
+                .limit(int(limit))
+                .all()
+            )
+
+            return [
+                {
+                    "id": ad_id,
+                    "title": title,
+                    "price": price,
+                    "status": status,
+                    "user_status": user_status,
+                    "last_seen_at": last_seen_at,
+                }
+                for (ad_id, title, price, status, user_status, last_seen_at) in rows
+            ]
         finally:
             session.close()
 

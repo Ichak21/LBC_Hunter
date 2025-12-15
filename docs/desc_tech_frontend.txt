@@ -88,6 +88,8 @@ Liste de toutes les recherches (tous statuts).
 
 Toggle pour Activer/Désactiver une recherche.
 
+forcé un scan
+
 Formulaire de création de nouvelle recherche.
 
 5. Page SETTINGS

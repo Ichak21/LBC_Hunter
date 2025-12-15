@@ -249,6 +249,21 @@ def load_search_details_data(search_id):
         session.close()
 
 
+@st.cache_data(ttl=load_app_config().streamlit.cache_ttl_seconds)
+def load_ad_details_data(ad_id: str):
+    db = DatabaseClient()
+    return db.fetch_ad_details(ad_id)
+
+
+@st.cache_data(ttl=load_app_config().streamlit.cache_ttl_seconds)
+def load_ads_selector(limit: int = 200):
+    """
+    Retourne une liste d'annonces pour le sélecteur de la page Details Ads.
+    """
+    db = DatabaseClient()
+    return db.list_ads_for_selector(limit=limit)
+
+
 def load_logs(lines=200):
     log_file = "logs/worker.log"
     if os.path.exists(log_file):
