@@ -1,0 +1,106 @@
+{
+    "weights": {
+        "deal": 0.45,
+        "conf": 0.3,
+        "prod": 0.25
+    },
+    "base_scores": {
+        "deal": 50,
+        "conf": 50,
+        "prod": 0
+    },
+    "confiance": {
+        "default_bonus_val": 5,
+        "default_malus_val": -5,
+        "bonus_tags": {
+            "premiere_main": 15,
+            "carnet_entretien": 10,
+            "factures": 10,
+            "suivi_garage": 5,
+            "vendeur_pro": 5,
+            "garantie": 5,
+            "ct_ok": 5
+        },
+        "malus_tags": {
+            "orthographe_deplorable": -15,
+            "ton_agressif": -10,
+            "description_vague": -10,
+            "cause_depart_suspecte": -5
+        },
+        "seller": {
+            "min_reviews": 5,
+            "top_threshold": 0.9,
+            "bad_threshold": 0.6,
+            "bonus_val": 10,
+            "malus_val": -10
+        },
+        "description": {
+            "short_len": 10,
+            "short_pen": -15,
+            "long_len": 100,
+            "long_bon": 5
+        }
+    },
+    "price_engine": {
+        "model_params": {
+            "n_estimators": 100,
+            "random_state": 42
+        },
+        "outliers": {
+            "min_price": 500,
+            "max_price": 200000,
+            "min_mileage": 500,
+            "max_mileage": 900000
+        },
+        "dynamic_features": {
+            "min_fill_rate": 0.6,
+            "candidates": [
+                "horsepower"
+            ]
+        },
+        "scoring": {
+            "good_deal_ratio": 0.5,
+            "neutral_ratio": 1.0,
+            "bad_deal_ratio": 1.5
+        },
+        "training": {
+            "min_samples": 15
+        },
+        "veto": {
+            "min_k_arnaque_for_market": 0.5,
+            "price_floor_ratio": 0.3,
+            "price_floor_stat": "median",
+            "exclude_user_status": [
+                "TRASH",
+                "SCAM_MANUAL"
+            ],
+            "exclude_status": [
+                "SCAM"
+            ],
+            "require_ai_scores": true
+        }
+    },
+    "severity": {
+        "meca": {
+            "alpha": 0.4,
+            "sum_cap": 1.0,
+            "k_min": 0.25
+        },
+        "modif": {
+            "alpha": 0.75,
+            "sum_cap": 0.6,
+            "k_min": 0.7,
+            "hard_threshold": 0.8,
+            "k_min_hard": 0.3
+        },
+        "arnaque": {
+            "alpha": 0.9,
+            "sum_cap": 0.4,
+            "k_min": 0.05
+        }
+    },
+    "automation": {
+        "min_interval_minutes": 45,
+        "max_interval_minutes": 90
+    }
+}

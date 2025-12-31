@@ -1,88 +1,99 @@
+import argparse
+import logging
+import time
+import sys
 from core.search_manager import SearchManager
 from core.scraper import LBCScraper
 from core.db_client import DatabaseClient
 from core.ai_analyst import AIAnalyst, AIConfigError
 from core.price_engine import PriceEngine
-from datetime import datetime
-import time
-import sys
-import os
-import logging
 from core.logging_config import setup_logging
 from core.app_config import load_app_config
 
+# Setup logging
 setup_logging(level=logging.INFO)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("google").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
-
 logger = logging.getLogger(__name__)
 
 
-def initialize_default_search():
-    searches = SearchManager.list_searches()
-    for searche in searches:
-        logger.info(f"🔍 {searche['id']}-{searche['name']}")
-
-
-def run_bot():
-    logger.info("🚀 --- LBC HUNTER ---")
+def run_worker(target_search_id=None, smart_mode=False):
+    logger.info("🚀 --- LBC HUNTER WORKER ---")
     cfg = load_app_config()
+    db = DatabaseClient()
 
     try:
-        db = DatabaseClient()
         analyst = AIAnalyst()
-        price_engine = PriceEngine(db)
     except AIConfigError as e:
         logger.error("🛑 IA non utilisable: %s", e)
         return
-    except Exception as e:
-        logger.exception("🛑 Erreur Init worker: %s", e)
-        return
 
-    # Init
-    initialize_default_search()
-    tasks = SearchManager.list_searches(only_active=True)
+    price_engine = PriceEngine(db)
 
+    # 1. DÉTERMINATION DES TÂCHES
+    tasks = []
+
+    if target_search_id:
+        # Mode : Scan manuel unique
+        s = SearchManager.get_search(target_search_id)
+        if s:
+            logger.info(f"🎯 Mode CIBLÉ : {s['name']}")
+            tasks = [s]
+        else:
+            logger.error(f"❌ Recherche introuvable : {target_search_id}")
+            return
+
+    elif smart_mode:
+        # Mode : Le plus urgent uniquement
+        s = SearchManager.get_oldest_active_search()
+        if s:
+            logger.info(
+                f"🧠 Mode SMART : Priorité à '{s['name']}' (Plus ancienne maj)")
+            tasks = [s]
+        else:
+            logger.info("💤 Aucune recherche active à traiter.")
+            return
+
+    else:
+        # Mode : Tout (Comportement par défaut)
+        logger.info(
+            "📋 Mode COMPLET : Traitement de toutes les recherches actives")
+        tasks = SearchManager.list_searches(only_active=True)
+
+    # 2. EXÉCUTION
     for task in tasks:
         logger.info(f"\n🔎 Traitement : {task['name']}")
 
-        # 1. SCRAPE LISTE
+        # A. SCRAPE
         html = LBCScraper.fetch_html(task['lbc_params'])
-        raw_data = LBCScraper.parse_data(html)
-        if not raw_data:
+        if not html:
+            logger.warning("   ⚠️ HTML vide ou erreur réseau.")
             continue
 
-        # 2. FILTER & TRANSFORM
+        raw_data = LBCScraper.parse_data(html)
+
+        # B. FILTER
         clean_ads = LBCScraper.process_ads(
             raw_data, task['filters']['whitelist'], task['filters']['blacklist'])
 
-        # 3. ENRICHISSEMENT INTELLIGENT
+        # C. ENRICH (IA)
         ads_to_save = []
-
         if clean_ads:
             logger.info(
-                f"   🎯 {len(clean_ads)} annonces détectées. Vérification du cache...")
+                f"   🎯 {len(clean_ads)} annonces détectées. Vérification...")
 
             for ad in clean_ads:
-                # Cache Check
-                already_analyzed = db.is_ad_analyzed(ad['id'])
-
-                if already_analyzed:
+                if db.is_ad_analyzed(ad['id']):
                     logger.info(
                         f"      👻 Connue (Skip IA) : {ad['title'][:20]}...")
                     ads_to_save.append(ad)
                     continue
 
-                # Deep Scraping
                 full_desc = LBCScraper.get_ad_description(ad['url'])
                 if full_desc:
                     ad['description'] = full_desc
-                else:
-                    logger.info(
-                        f"      ⚠️ Pas de description pour {ad['title']}")
 
-                # Analyse Gemini
                 logger.info(
                     f"      🧠 NOUVEAU -> Analyse IA : {ad['title'][:20]}...")
                 ai_result = analyst.analyze_ad(ad)
@@ -91,27 +102,35 @@ def run_bot():
                 if ai_result:
                     ad.update(ai_result)
                     if ai_result["scores"]["sanity_checks"]["k_arnaque"] < 0.3:
-                        logger.info("         💀 SCAM DÉTECTÉ !")
+                        logger.info("          💀 SCAM DÉTECTÉ !")
 
                 ads_to_save.append(ad)
 
-        # 4. SAVE (Sauvegarde des nouvelles données)
+        # D. SAVE
         if ads_to_save:
             db.upsert_ads(ads_to_save, search_id=task['id'])
-            SearchManager.update_last_run(task['id'])
 
-        # 5. MARKET ANALYSIS (Le Sprint 4 !)
-        # Une fois qu'on a toutes les données à jour, on lance les maths
-        logger.info(f"   📐 Calcul de la cote marché (Random Forest)...")
+        # Toujours mettre à jour la date de run, même si 0 annonce (pour que le smart mode tourne)
+        SearchManager.update_last_run(task['id'])
+
+        # E. MARKET ANALYSIS
+        logger.info(f"   📐 Calcul de la cote marché...")
         price_engine.update_deal_scores(task['id'])
 
-    # 6. NETTOYAGE (Une fois que toutes les recherches sont finies)
-    # On vérifie les annonces qu'on n'a pas vues depuis 3 jours (par exemple)
-    logger.info("\n🧹 Vérification des annonces disparues...")
-    db.archive_old_ads(days_threshold=cfg.worker.archive_days_threshold)
+    # 3. NETTOYAGE (Uniquement si on fait un run complet ou smart, pas ciblé)
+    if not target_search_id:
+        logger.info("\n🧹 Vérification des annonces disparues...")
+        db.archive_old_ads(days_threshold=cfg.worker.archive_days_threshold)
 
     logger.info("\n✅ Job terminé.")
 
 
 if __name__ == "__main__":
-    run_bot()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--smart", action="store_true",
+                        help="Lance uniquement la recherche la plus ancienne")
+    parser.add_argument("--search_id", type=str,
+                        help="Lance une recherche spécifique par son ID")
+    args = parser.parse_args()
+
+    run_worker(target_search_id=args.search_id, smart_mode=args.smart)

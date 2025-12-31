@@ -1,0 +1,10 @@
+-> refactor le script de generation de CONTEXTE
+-> faire la liste des point en 3 categorie : bug, amelioration, new features
+-> reprendre sur la base du prompt auditor pour faire un prompt au quel on copie colle le resultat du script context et qui réponds :
+1*   1er iteration robustess du code et cleanning
+2*   debugage
+3*   aùmemioration 
+4*   news features
+5*   Final débug et clean 
+
+6 --> packaging et running

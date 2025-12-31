@@ -1,15 +1,19 @@
 # CONTEXTE COMPLET DU PROJET
 # NOTE A L'IA: Voici la structure du projet suivie du contenu des fichiers.
+Important : ignore les fichier non donné dans l'aboresence 
 
 ==================================================
 PROJECT STRUCTURE:
 .
 │   ├── dashboard.py
 │   ├── main.py
+│   ├── scheduler.py
+│   ├── scoring.json
 │   ├── core/
 │   │   ├── ai_analyst.py
 │   │   ├── app_config.py
 │   │   ├── config.py
+│   │   ├── config_manager.py
 │   │   ├── db_client.py
 │   │   ├── logging_config.py
 │   │   ├── models.py
@@ -19,8 +23,6 @@ PROJECT STRUCTURE:
 │   │   ├── scraper.py
 │   │   ├── search_manager.py
 │   │   ├── __init__.py
-│   ├── docs/
-│   │   ├── whitepaper_traceability.md
 │   ├── frontend/
 │   │   ├── data_loader.py
 │   │   ├── layout.py
@@ -34,6 +36,8 @@ PROJECT STRUCTURE:
 │   ├── searches/
 │   │   ├── ford_focus_rs_mk2_d59147d7-669e-4e8c-9bfc-c461c18beb4a.json
 │   ├── tools/
+│   │   ├── auditor_prompt.txt
+│   │   ├── check_models.py
 │   │   ├── simulate_k.py
 │   │   ├── verify_contract.py
 │   │   ├── _bootstrap.py
@@ -267,91 +271,102 @@ consume_nav()
 ==================================================
 FILE_PATH: main.py
 ==================================================
+import argparse
+import logging
+import time
+import sys
 from core.search_manager import SearchManager
 from core.scraper import LBCScraper
 from core.db_client import DatabaseClient
 from core.ai_analyst import AIAnalyst, AIConfigError
 from core.price_engine import PriceEngine
-from datetime import datetime
-import time
-import sys
-import os
-import logging
 from core.logging_config import setup_logging
 from core.app_config import load_app_config
 
+# Setup logging
 setup_logging(level=logging.INFO)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("google").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
-
 logger = logging.getLogger(__name__)
 
 
-def initialize_default_search():
-    searches = SearchManager.list_searches()
-    for searche in searches:
-        logger.info(f"🔍 {searche['id']}-{searche['name']}")
-
-
-def run_bot():
-    logger.info("🚀 --- LBC HUNTER ---")
+def run_worker(target_search_id=None, smart_mode=False):
+    logger.info("🚀 --- LBC HUNTER WORKER ---")
     cfg = load_app_config()
+    db = DatabaseClient()
 
     try:
-        db = DatabaseClient()
         analyst = AIAnalyst()
-        price_engine = PriceEngine(db)
     except AIConfigError as e:
         logger.error("🛑 IA non utilisable: %s", e)
         return
-    except Exception as e:
-        logger.exception("🛑 Erreur Init worker: %s", e)
-        return
 
-    # Init
-    initialize_default_search()
-    tasks = SearchManager.list_searches(only_active=True)
+    price_engine = PriceEngine(db)
 
+    # 1. DÉTERMINATION DES TÂCHES
+    tasks = []
+
+    if target_search_id:
+        # Mode : Scan manuel unique
+        s = SearchManager.get_search(target_search_id)
+        if s:
+            logger.info(f"🎯 Mode CIBLÉ : {s['name']}")
+            tasks = [s]
+        else:
+            logger.error(f"❌ Recherche introuvable : {target_search_id}")
+            return
+
+    elif smart_mode:
+        # Mode : Le plus urgent uniquement
+        s = SearchManager.get_oldest_active_search()
+        if s:
+            logger.info(
+                f"🧠 Mode SMART : Priorité à '{s['name']}' (Plus ancienne maj)")
+            tasks = [s]
+        else:
+            logger.info("💤 Aucune recherche active à traiter.")
+            return
+
+    else:
+        # Mode : Tout (Comportement par défaut)
+        logger.info(
+            "📋 Mode COMPLET : Traitement de toutes les recherches actives")
+        tasks = SearchManager.list_searches(only_active=True)
+
+    # 2. EXÉCUTION
     for task in tasks:
         logger.info(f"\n🔎 Traitement : {task['name']}")
 
-        # 1. SCRAPE LISTE
+        # A. SCRAPE
         html = LBCScraper.fetch_html(task['lbc_params'])
-        raw_data = LBCScraper.parse_data(html)
-        if not raw_data:
+        if not html:
+            logger.warning("   ⚠️ HTML vide ou erreur réseau.")
             continue
 
-        # 2. FILTER & TRANSFORM
+        raw_data = LBCScraper.parse_data(html)
+
+        # B. FILTER
         clean_ads = LBCScraper.process_ads(
             raw_data, task['filters']['whitelist'], task['filters']['blacklist'])
 
-        # 3. ENRICHISSEMENT INTELLIGENT
+        # C. ENRICH (IA)
         ads_to_save = []
-
         if clean_ads:
             logger.info(
-                f"   🎯 {len(clean_ads)} annonces détectées. Vérification du cache...")
+                f"   🎯 {len(clean_ads)} annonces détectées. Vérification...")
 
             for ad in clean_ads:
-                # Cache Check
-                already_analyzed = db.is_ad_analyzed(ad['id'])
-
-                if already_analyzed:
+                if db.is_ad_analyzed(ad['id']):
                     logger.info(
                         f"      👻 Connue (Skip IA) : {ad['title'][:20]}...")
                     ads_to_save.append(ad)
                     continue
 
-                # Deep Scraping
                 full_desc = LBCScraper.get_ad_description(ad['url'])
                 if full_desc:
                     ad['description'] = full_desc
-                else:
-                    logger.info(
-                        f"      ⚠️ Pas de description pour {ad['title']}")
 
-                # Analyse Gemini
                 logger.info(
                     f"      🧠 NOUVEAU -> Analyse IA : {ad['title'][:20]}...")
                 ai_result = analyst.analyze_ad(ad)
@@ -360,30 +375,305 @@ def run_bot():
                 if ai_result:
                     ad.update(ai_result)
                     if ai_result["scores"]["sanity_checks"]["k_arnaque"] < 0.3:
-                        logger.info("         💀 SCAM DÉTECTÉ !")
+                        logger.info("          💀 SCAM DÉTECTÉ !")
 
                 ads_to_save.append(ad)
 
-        # 4. SAVE (Sauvegarde des nouvelles données)
+        # D. SAVE
         if ads_to_save:
             db.upsert_ads(ads_to_save, search_id=task['id'])
-            SearchManager.update_last_run(task['id'])
 
-        # 5. MARKET ANALYSIS (Le Sprint 4 !)
-        # Une fois qu'on a toutes les données à jour, on lance les maths
-        logger.info(f"   📐 Calcul de la cote marché (Random Forest)...")
+        # Toujours mettre à jour la date de run, même si 0 annonce (pour que le smart mode tourne)
+        SearchManager.update_last_run(task['id'])
+
+        # E. MARKET ANALYSIS
+        logger.info(f"   📐 Calcul de la cote marché...")
         price_engine.update_deal_scores(task['id'])
 
-    # 6. NETTOYAGE (Une fois que toutes les recherches sont finies)
-    # On vérifie les annonces qu'on n'a pas vues depuis 3 jours (par exemple)
-    logger.info("\n🧹 Vérification des annonces disparues...")
-    db.archive_old_ads(days_threshold=cfg.worker.archive_days_threshold)
+    # 3. NETTOYAGE (Uniquement si on fait un run complet ou smart, pas ciblé)
+    if not target_search_id:
+        logger.info("\n🧹 Vérification des annonces disparues...")
+        db.archive_old_ads(days_threshold=cfg.worker.archive_days_threshold)
 
     logger.info("\n✅ Job terminé.")
 
 
 if __name__ == "__main__":
-    run_bot()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--smart", action="store_true",
+                        help="Lance uniquement la recherche la plus ancienne")
+    parser.add_argument("--search_id", type=str,
+                        help="Lance une recherche spécifique par son ID")
+    args = parser.parse_args()
+
+    run_worker(target_search_id=args.search_id, smart_mode=args.smart)
+
+
+==================================================
+FILE_PATH: README.md
+==================================================
+# 🦅 LBC_Hunter
+
+**LBC_Hunter** est une application Python d’analyse intelligente d’annonces automobiles LeBonCoin.  
+Elle combine scraping, IA et scoring métier pour détecter les bonnes affaires, estimer le prix marché et identifier les risques (arnaque, modifications, fiabilité).
+
+---
+
+## ✨ Fonctionnalités principales
+
+- 🔎 **Scraping intelligent LeBonCoin**
+  - recherches configurables (prix, année, mots-clés, whitelist / blacklist)
+  - rotation user-agent & délais humains
+
+- 🧠 **Analyse IA (Gemini)**
+  - résumé expert
+  - détection des risques mécaniques
+  - détection des modifications
+  - indices d’arnaque
+  - scoring explicable par pilier
+
+- 📐 **Moteur de prix (Price Engine)**
+  - estimation de la cote marché via RandomForest
+  - score “Deal” basé sur ratios configurables
+  - recalcul automatique des scores
+
+- 📊 **Interface Streamlit multi-pages**
+  - dashboard global
+  - analyse détaillée par recherche
+  - navigation fluide entre recherches et annonces
+
+- ⚙️ **Architecture robuste**
+  - configuration centralisée (`AppConfig`)
+  - logs structurés (console + fichier)
+  - cache Streamlit maîtrisé
+  - scoring 100% paramétrable
+
+---
+
+## 🧱 Architecture (simplifiée)
+
+LBC_HUNTER/
+├── core/ # logique métier (IA, scoring, DB, scraping)
+├── frontend/ # helpers UI Streamlit
+├── pages/ # pages Streamlit (multi-pages)
+├── tools/ # scripts de vérification & utilitaires
+├── logs/ # runtime (ignoré par git)
+├── searches/ # configs de recherches (ignoré par git)
+├── dashboard.py # Home Streamlit
+└── main.py # Worker (scraping + IA + scoring)
+
+---
+
+## 🚀 Lancement
+
+### 1️⃣ Pré-requis
+- Python 3.11+
+- PostgreSQL
+- Une clé API Gemini
+
+### 2️⃣ Installation
+```bash
+pip install -r requirements.txt
+
+==================================================
+FILE_PATH: scheduler.py
+==================================================
+import time
+import random
+import subprocess
+import logging
+import sys
+from core.config_manager import ConfigManager
+
+# Configuration du log spécifique au scheduler
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [SCHEDULER] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger()
+
+
+def get_intervals():
+    """Récupère les intervalles depuis la config dynamique ou utilise des défauts."""
+    config = ConfigManager.get_config()
+    automation = config.get("automation", {})
+    # Par défaut : entre 15 et 45 minutes
+    min_m = automation.get("min_interval_minutes", 30)
+    max_m = automation.get("max_interval_minutes", 90)
+    return min_m, max_m
+
+
+def main():
+    logger.info("🕰️ Démarrage du Scheduler LBC Hunter...")
+
+    while True:
+        # 1. Lancement du worker en mode SMART
+        logger.info("🚀 Lancement du worker (Mode SMART)...")
+        try:
+            # On utilise sys.executable pour être sûr d'utiliser le même python (venv)
+            subprocess.run([sys.executable, "main.py", "--smart"], check=False)
+        except Exception as e:
+            logger.error(f"❌ Erreur lors de l'exécution du worker : {e}")
+
+        # 2. Calcul du temps d'attente aléatoire
+        min_m, max_m = get_intervals()
+        wait_minutes = random.randint(min_m, max_m)
+        wait_seconds = wait_minutes * 60
+
+        logger.info(
+            f"💤 Prochain scan dans {wait_minutes} minutes ({time.strftime('%H:%M', time.localtime(time.time() + wait_seconds))})")
+
+        # 3. Dodo
+        time.sleep(wait_seconds)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("🛑 Arrêt du Scheduler.")
+
+
+==================================================
+FILE_PATH: scoring.json
+==================================================
+{
+    "weights": {
+        "deal": 0.45,
+        "conf": 0.3,
+        "prod": 0.25
+    },
+    "base_scores": {
+        "deal": 50,
+        "conf": 50,
+        "prod": 0
+    },
+    "confiance": {
+        "default_bonus_val": 5,
+        "default_malus_val": -5,
+        "bonus_tags": {
+            "premiere_main": 15,
+            "carnet_entretien": 10,
+            "factures": 10,
+            "suivi_garage": 5,
+            "vendeur_pro": 5,
+            "garantie": 5,
+            "ct_ok": 5
+        },
+        "malus_tags": {
+            "orthographe_deplorable": -15,
+            "ton_agressif": -10,
+            "description_vague": -10,
+            "cause_depart_suspecte": -5
+        },
+        "seller": {
+            "min_reviews": 5,
+            "top_threshold": 0.9,
+            "bad_threshold": 0.6,
+            "bonus_val": 10,
+            "malus_val": -10
+        },
+        "description": {
+            "short_len": 10,
+            "short_pen": -15,
+            "long_len": 100,
+            "long_bon": 5
+        }
+    },
+    "price_engine": {
+        "model_params": {
+            "n_estimators": 100,
+            "random_state": 42
+        },
+        "outliers": {
+            "min_price": 500,
+            "max_price": 200000,
+            "min_mileage": 500,
+            "max_mileage": 900000
+        },
+        "dynamic_features": {
+            "min_fill_rate": 0.6,
+            "candidates": [
+                "horsepower"
+            ]
+        },
+        "scoring": {
+            "good_deal_ratio": 0.5,
+            "neutral_ratio": 1.0,
+            "bad_deal_ratio": 1.5
+        },
+        "training": {
+            "min_samples": 15
+        },
+        "veto": {
+            "min_k_arnaque_for_market": 0.5,
+            "price_floor_ratio": 0.3,
+            "price_floor_stat": "median",
+            "exclude_user_status": [
+                "TRASH",
+                "SCAM_MANUAL"
+            ],
+            "exclude_status": [
+                "SCAM"
+            ],
+            "require_ai_scores": true
+        }
+    },
+    "severity": {
+        "meca": {
+            "alpha": 0.4,
+            "sum_cap": 1.0,
+            "k_min": 0.25
+        },
+        "modif": {
+            "alpha": 0.75,
+            "sum_cap": 0.6,
+            "k_min": 0.7,
+            "hard_threshold": 0.8,
+            "k_min_hard": 0.3
+        },
+        "arnaque": {
+            "alpha": 0.9,
+            "sum_cap": 0.4,
+            "k_min": 0.05
+        }
+    },
+    "automation": {
+        "min_interval_minutes": 45,
+        "max_interval_minutes": 90
+    }
+}
+
+==================================================
+FILE_PATH: test_config.py
+==================================================
+from core.config_manager import ConfigManager
+
+print("--- TEST 1: Chargement Défaut ---")
+conf = ConfigManager.get_config()
+# Vérification d'une valeur par défaut (0.5 attendu)
+print(f"Poids Deal (Défaut) : {conf['weights']['deal']}")
+
+print("\n--- TEST 2: Modification & Sauvegarde ---")
+conf['weights']['deal'] = 0.99  # On change la valeur
+ConfigManager.save_config(conf)
+print("Sauvegarde effectuée.")
+
+print("\n--- TEST 3: Rechargement (Persistance) ---")
+conf_new = ConfigManager.get_config()
+# Vérification de la persistance (0.99 attendu)
+print(f"Poids Deal (Nouveau) : {conf_new['weights']['deal']}")
+
+print("\n--- TEST 4: Reset Usine ---")
+ConfigManager.reset_to_default()
+conf_reset = ConfigManager.get_config()
+# Vérification du retour à la normale (0.5 attendu)
+print(f"Poids Deal (Reset) : {conf_reset['weights']['deal']}")
+
+print("\n✅ Si les valeurs sont cohérentes (0.5 -> 0.99 -> 0.5), le Manager fonctionne !")
+
 
 ==================================================
 FILE_PATH: core\ai_analyst.py
@@ -394,7 +684,7 @@ import logging
 from typing import Any, Optional
 import google.generativeai as genai
 from dotenv import load_dotenv
-from .scoring_config import SCORING_CONFIG
+from .config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -444,9 +734,7 @@ class AIAnalyst:
         )
 
     def analyze_ad(self, ad_data: dict) -> Optional[dict]:
-        """
-        Retourne un dict {ai_analysis, scores} ou None si erreur non récupérable.
-        """
+        """Retourne un dict {ai_analysis, scores} ou None si erreur non récupérable."""
         description = ad_data.get("description") or ad_data.get("raw_attributes", {}).get(
             "description_text", "Pas de description"
         )
@@ -469,7 +757,6 @@ Note Vendeur : {ad_data.get('seller_rating', 'N/A')} (sur 1.0) - {ad_data.get('s
 
 --- TA MISSION ---
 - IMPORTANT : Les champs "severity" doivent être compris entre 0.0 et 1.0, et refléter la gravité réelle.
-
 - IMPORTANT: Pour "risques_meca[].severity" (0.0 à 1.0), utilise cette grille:
   * 0.05-0.15: mineur / entretien courant (petite fuite, pneus à prévoir, consommable)
   * 0.20-0.40: défaut notable mais généralement gérable (freins, suspension fatiguée, capteur, petite fuite)
@@ -530,8 +817,8 @@ RÉPONDS UNIQUEMENT EN JSON STRICT :
     @staticmethod
     def _safe_json_loads(text: str) -> dict:
         """
-        Tente de parser du JSON strict. Si l’IA entoure de ```json ... ```,
-        on nettoie proprement.
+        Tente de parser du JSON strict.
+        Si l’IA entoure de ```json ... ```, on nettoie proprement.
         """
         cleaned = text.strip()
 
@@ -555,9 +842,15 @@ RÉPONDS UNIQUEMENT EN JSON STRICT :
                 "Schéma invalide: 'ai_analysis' n’est pas un objet.")
 
     def _calculate_score(self, gemini_data: dict, ad_data: dict) -> dict:
+        # --- CHARGEMENT DYNAMIQUE VIA CONFIG MANAGER ---
+        config = ConfigManager.get_config()
+
         analysis = gemini_data.get("ai_analysis", {})
-        conf_cfg = SCORING_CONFIG["confiance"]
-        base_scores = SCORING_CONFIG["base_scores"]
+
+        # On récupère les sections depuis la config chargée
+        conf_cfg = config["confiance"]
+        base_scores = config["base_scores"]
+        sev_cfg = config.get("severity", {})  # Paramètres de calcul des K
 
         def safe_float(val):
             try:
@@ -578,6 +871,7 @@ RÉPONDS UNIQUEMENT EN JSON STRICT :
             return max(lo, min(hi, x))
 
         def aggregate_k(items: list[dict], cfg: dict) -> float:
+            # Récupération des seuils depuis la config dynamique
             alpha = float(cfg.get("alpha", 0.7))
             sum_cap = float(cfg.get("sum_cap", 0.6))
             hard_threshold = cfg.get("hard_threshold", None)
@@ -594,15 +888,14 @@ RÉPONDS UNIQUEMENT EN JSON STRICT :
 
             penalty = (alpha * s_max) + ((1.0 - alpha) * s_sum)
             k = 1.0 - penalty
+
             k_min = k_min_soft
             if hard_threshold is not None and s_max >= float(hard_threshold):
                 k_min = k_min_hard
 
             return clamp(k, k_min, 1.0)
-            return clamp(k, k_min, 1.0)
-        # --- B. CALCUL FIABILITÉ (K) ---
-        sev_cfg = SCORING_CONFIG.get("severity", {})
 
+        # --- B. CALCUL FIABILITÉ (K) ---
         k_meca = aggregate_k(analysis.get(
             "risques_meca", []), sev_cfg.get("meca", {}))
         k_modif = aggregate_k(analysis.get(
@@ -654,7 +947,7 @@ RÉPONDS UNIQUEMENT EN JSON STRICT :
         s_prod = max(0, min(100, s_prod))
 
         # --- F. SCORE FINAL ---
-        weights = SCORING_CONFIG["weights"]
+        weights = config["weights"]
         score_base = (s_deal * weights["deal"]) + (s_conf *
                                                    weights["conf"]) + (s_prod * weights["prod"])
 
@@ -811,6 +1104,82 @@ def get_random_headers():
         "Referer": "https://www.google.com/",
         "Connection": "keep-alive",
     }
+
+
+==================================================
+FILE_PATH: core\config_manager.py
+==================================================
+import json
+import os
+import logging
+from pathlib import Path
+from copy import deepcopy
+from typing import Dict, Any
+
+# On importe la config statique comme "Défaut d'usine"
+from .scoring_config import SCORING_CONFIG as DEFAULT_CONFIG
+
+logger = logging.getLogger(__name__)
+
+# Le fichier JSON sera stocké à la racine du projet
+CONFIG_FILE = Path("scoring.json")
+
+
+class ConfigManager:
+    """
+    Gère la configuration dynamique de l'application.
+    Source de vérité : scoring.json (si présent) > scoring_config.py (défaut).
+    """
+
+    @staticmethod
+    def get_config() -> Dict[str, Any]:
+        """
+        Charge la configuration active.
+        """
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    # Optionnel : On pourrait merger avec DEFAULT_CONFIG ici
+                    # pour s'assurer qu'il ne manque pas de clés en cas de mise à jour code.
+                    return data
+            except Exception as e:
+                logger.error(
+                    f"⚠️ Erreur lecture scoring.json (corrompu ?). Retour aux défauts. Erreur: {e}")
+                return deepcopy(DEFAULT_CONFIG)
+
+        # Si pas de fichier JSON, on renvoie la config d'usine
+        return deepcopy(DEFAULT_CONFIG)
+
+    @staticmethod
+    def save_config(new_config: Dict[str, Any]) -> None:
+        """
+        Sauvegarde la configuration modifiée dans le JSON.
+        """
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(new_config, f, indent=4, ensure_ascii=False)
+            logger.info("💾 Configuration sauvegardée dans scoring.json")
+        except Exception as e:
+            logger.exception(f"❌ Erreur sauvegarde configuration : {e}")
+            raise e
+
+    @staticmethod
+    def reset_to_default() -> None:
+        """
+        Supprime le fichier JSON pour revenir à la configuration d'usine.
+        """
+        if CONFIG_FILE.exists():
+            try:
+                os.remove(CONFIG_FILE)
+                logger.info(
+                    "♻️ Configuration réinitialisée aux paramètres d'usine.")
+            except Exception as e:
+                logger.exception(
+                    f"❌ Impossible de supprimer scoring.json : {e}")
+                raise e
+        else:
+            logger.info("ℹ️ Déjà en configuration d'usine.")
 
 
 ==================================================
@@ -1265,43 +1634,6 @@ class DatabaseClient:
             session.close()
 
 
-if __name__ == "__main__":
-    logger.info("🚀 Démarrage du test COMPLET BDD...")
-
-    # 1. Connexion
-    db = DatabaseClient()
-
-    # 2. Test Insertion
-    print("\n--- TEST 1 : Insertion ---")
-    fake_data = [{
-        "id": "test_archive_logic",
-        "title": "Voiture qui va disparaître",
-        "price": 1000,
-        "url": "http://test",
-        "date": "2023-01-01 12:00:00"
-    }]
-    db.upsert_ads(fake_data, search_id="test_uuid")
-
-    # 3. Test Archivage (Simulation)
-    print("\n--- TEST 2 : Archivage ---")
-    # Pour tester, on va tricher et changer la date 'last_seen_at' en base directement via SQL
-    # (C'est juste pour le test ici, en vrai ça se fera avec le temps)
-    session = db.Session()
-    ad = session.query(Ad).filter_by(id="test_archive_logic").first()
-    if ad:
-        # On fait croire qu'on l'a vue il y a 10 jours
-        ad.last_seen_at = datetime.now() - timedelta(days=10)
-        session.commit()
-        print("🕒 (Triche) On a vieilli l'annonce de 10 jours pour le test.")
-    session.close()
-
-    # On lance le nettoyage avec un seuil de 2 jours.
-    # Comme l'annonce a 10 jours, elle doit passer en SOLD.
-    db.archive_old_ads(days_threshold=2)
-
-    print("\n✅ Si tu vois 'Ménage terminé : 1 annonces...', tout fonctionne !")
-
-
 ==================================================
 FILE_PATH: core\logging_config.py
 ==================================================
@@ -1430,7 +1762,7 @@ from sklearn.ensemble import RandomForestRegressor
 
 from .db_client import DatabaseClient
 from .models import Ad
-from .scoring_config import SCORING_CONFIG
+from .config_manager import ConfigManager  # <--- NOUVEAU
 from .search_manager import SearchManager
 
 logger = logging.getLogger(__name__)
@@ -1439,15 +1771,14 @@ logger = logging.getLogger(__name__)
 class PriceEngine:
     def __init__(self, db_client: DatabaseClient):
         self.db = db_client
+        self.config = ConfigManager.get_config()  # Charge config au démarrage
 
-        params = SCORING_CONFIG["price_engine"]["model_params"]
+        params = self.config["price_engine"]["model_params"]
         self.model = RandomForestRegressor(
             n_estimators=int(params["n_estimators"]),
             random_state=int(params["random_state"]),
         )
         self.is_trained = False
-
-        # MÉMOIRE DU MODÈLE
         self.model_meta: Dict[str, Any] = {
             "features_used": [],
             "imputers": {},
@@ -1455,6 +1786,9 @@ class PriceEngine:
 
     def get_data_for_search(self, search_id: str) -> pd.DataFrame:
         try:
+            # Recharger la config pour être à jour (au cas où modifiée entre temps)
+            config = ConfigManager.get_config()
+
             rows = self.db.fetch_ads_for_price_training(search_id)
             if not rows:
                 return pd.DataFrame()
@@ -1465,7 +1799,7 @@ class PriceEngine:
 
             df = df.dropna(subset=["price", "year", "mileage"])
 
-            veto = SCORING_CONFIG["price_engine"].get("veto", {})
+            veto = config["price_engine"].get("veto", {})
             min_k = float(veto.get("min_k_arnaque_for_market", 0.5))
             exclude_user = set(veto.get("exclude_user_status", []))
             exclude_status = set(veto.get("exclude_status", []))
@@ -1485,7 +1819,7 @@ class PriceEngine:
             if df.empty:
                 return pd.DataFrame()
 
-            # prix aberrant relatif (ratio * médiane/mean)
+            # prix aberrant relatif
             price_floor_ratio = float(veto.get("price_floor_ratio", 0.30))
             price_floor_stat = str(
                 veto.get("price_floor_stat", "median")).lower()
@@ -1502,7 +1836,7 @@ class PriceEngine:
                 return pd.DataFrame()
 
             # outliers
-            limits = SCORING_CONFIG["price_engine"]["outliers"]
+            limits = config["price_engine"]["outliers"]
             df = df[
                 (df["price"] >= limits["min_price"]) &
                 (df["price"] <= limits["max_price"]) &
@@ -1521,7 +1855,8 @@ class PriceEngine:
             return pd.DataFrame()
 
     def train(self, search_id: str, df: pd.DataFrame) -> None:
-        training_cfg = SCORING_CONFIG["price_engine"].get("training", {})
+        config = ConfigManager.get_config()
+        training_cfg = config["price_engine"].get("training", {})
         min_samples = int(training_cfg.get("min_samples", 30))
 
         if df is None or df.empty or len(df) < min_samples:
@@ -1535,12 +1870,10 @@ class PriceEngine:
             SearchManager.update_model_meta(search_id, {"r2_score": "N/A"})
             return
 
-        # 1) FEATURES OBLIGATOIRES
         base_features = ["year", "mileage"]
         final_features = base_features.copy()
 
-        # 2) FEATURES DYNAMIQUES
-        dyn_conf = SCORING_CONFIG["price_engine"]["dynamic_features"]
+        dyn_conf = config["price_engine"]["dynamic_features"]
         for col in dyn_conf.get("candidates", []):
             if col in df.columns:
                 fill_rate = df[col].notna().mean()
@@ -1549,22 +1882,17 @@ class PriceEngine:
                     self.model_meta["imputers"][col] = median_val
                     df[col] = df[col].fillna(median_val)
                     final_features.append(col)
-                    logger.info(
-                        "Feature retenue: %s (fill_rate=%.0f%%)", col, fill_rate * 100)
                 else:
-                    logger.info(
-                        "Feature rejetée: %s (fill_rate=%.0f%%)", col, fill_rate * 100)
+                    pass
 
         self.model_meta["features_used"] = final_features
 
-        # 3) ENTRAÎNEMENT
         X = df[final_features]
         y = df["price"]
 
         self.model.fit(X, y)
         self.is_trained = True
 
-        # Score R² (sur train, conforme à ton implémentation)
         score = float(self.model.score(X, y))
         logger.info(
             "Modèle entraîné [search=%s] features=%s R²=%.2f", search_id, final_features, score)
@@ -1574,14 +1902,11 @@ class PriceEngine:
     def predict_price(self, year: int, km: int, hp: int | None = None) -> Optional[float]:
         if not self.is_trained:
             return None
-
         try:
             input_data: Dict[str, Any] = {"year": year, "mileage": km}
-
             for col in self.model_meta["features_used"]:
                 if col in ("year", "mileage"):
                     continue
-
                 if col == "horsepower":
                     input_data[col] = hp if hp is not None else self.model_meta["imputers"].get(
                         col, 0)
@@ -1590,14 +1915,14 @@ class PriceEngine:
                 self.model_meta["features_used"]]
             predicted = float(self.model.predict(features_df)[0])
             return round(predicted, 2)
-
         except Exception as e:
             logger.exception("Erreur predict_price: %s", e)
             return None
 
     @staticmethod
     def _deal_score_from_ratio(ratio: float) -> float:
-        cfg = SCORING_CONFIG["price_engine"]["scoring"]
+        # Lecture config statique (méthode statique oblige, ou on refait l'appel)
+        cfg = ConfigManager.get_config()["price_engine"]["scoring"]
 
         r_good = float(cfg["good_deal_ratio"])
         r_neutral = float(cfg.get("neutral_ratio", 1.0))
@@ -1609,15 +1934,14 @@ class PriceEngine:
             return 0.0
 
         if ratio <= r_neutral:
-            # 100 → 50
             return 50.0 + (r_neutral - ratio) * (50.0 / (r_neutral - r_good))
         else:
-            # 50 → 0
             return 50.0 - (ratio - r_neutral) * (50.0 / (r_bad - r_neutral))
 
     def update_deal_scores(self, search_id: str) -> None:
         logger.info("Audit du marché [search=%s]...", search_id)
 
+        # Le config manager est appelé dans get_data et train
         df = self.get_data_for_search(search_id)
         if df.empty:
             logger.warning(
@@ -1636,6 +1960,10 @@ class PriceEngine:
             ads = self.db.fetch_active_ads_for_deal_update(search_id)
             updates = []
 
+            # Relecture pour avoir les poids à jour
+            config = ConfigManager.get_config()
+            weights = config["weights"]
+
             for ad in ads:
                 year = ad.get("year")
                 mileage = ad.get("mileage")
@@ -1647,7 +1975,6 @@ class PriceEngine:
                 if not fair_price or fair_price <= 0:
                     continue
 
-                # prix virtuel
                 repair_cost = 0
                 ai_analysis = ad.get("ai_analysis") or {}
                 for frais in ai_analysis.get("frais_chiffrables", []):
@@ -1674,7 +2001,6 @@ class PriceEngine:
                 # Recalcul total
                 s_conf = float(current_scores.get("base", {}).get("conf", 50))
                 s_prod = float(current_scores.get("base", {}).get("prod", 0))
-                weights = SCORING_CONFIG["weights"]
 
                 total = (s_deal * weights["deal"]) + (s_conf *
                                                       weights["conf"]) + (s_prod * weights["prod"])
@@ -2292,80 +2618,334 @@ class SearchManager:
             os.remove(file_path)
             logger.info(f"🗑️ Fichier supprimé : {file_path.name}")
 
+    @staticmethod
+    def get_oldest_active_search() -> dict | None:
+        """
+        Retourne la recherche active qui a été mise à jour il y a le plus longtemps.
+        Priorité aux recherches jamais lancées (last_run_at is None).
+        """
+        searches = SearchManager.list_searches(only_active=True)
+        if not searches:
+            return None
 
-def main() -> None:
-    print("==== Starter Searches ====")
-    # # --- Peugeot 106 Rallye (Phase 1 & 2) ---
-    # # Phase 1: 1993-1996 (1.3) / Phase 2: 1996-1998 (1.6)
-    # RALLYE_106 = SearchManager.build_params(
-    #     "106 rallye", min_year="1993", max_year="1999")
-    # SearchManager.create_search(
-    #     name="Peugeot 106 Rallye",
-    #     lbc_params=RALLYE_106,
-    #     whitelist=["rallye", "1.3", "1.6", "phase 1", "phase 2"],
-    #     blacklist=[
-    #         "s16", "xsi", "sport", "enfant", "quiksilver", "kid", "xn", "xr", "xt",
-    #         "diesel", "1.5d", "1.4", "jante", "piece", "recherche", "demande",
-    #         "accident", "export", "carte grise", "vends pieces"
-    #     ]
-    # )
+        # On trie : d'abord ceux qui ont None (jamais lancés), puis par date croissante (le plus vieux d'abord)
+        # La clé de tri renvoie un tuple (A, B) :
+        # A = 0 si last_run est None (prioritaire), 1 sinon.
+        # B = la date elle-même (ou min date si None pour ne pas planter)
 
-    # # --- Mazda MX-5 NA (Mk1) ---
-    # # Production 1989-1997
-    # MX5_NA = SearchManager.build_params(
-    #     "mx5", min_year="1989", max_year="1998")
-    # SearchManager.create_search(
-    #     name="Mazda MX-5 NA (Mk1)",
-    #     lbc_params=MX5_NA,
-    #     whitelist=["na", "mk1", "miata", "eunos",
-    #                "115", "90", "130", "pop up"],
-    #     blacklist=[
-    #         "nb", "mk2", "nc", "mk3", "nd", "mk4", "nbfl", "140", "145", "1.8 vvt",
-    #         "hardtop", "jante", "piece", "recherche", "demande", "location",
-    #         "accident", "export", "catalyseur"
-    #     ]
-    # )
+        def sort_key(s):
+            last_run = s.get("last_run_at")
+            if last_run is None:
+                return (0, "")
+            return (1, last_run)
 
-    # # --- Mazda MX-5 NB (Mk2 & NBFL) ---
-    # # Production 1998-2005
-    # MX5_NB = SearchManager.build_params(
-    #     "mx5", min_year="1998", max_year="2005")
-    # SearchManager.create_search(
-    #     name="Mazda MX-5 NB (Mk2)",
-    #     lbc_params=MX5_NB,
-    #     whitelist=["nb", "mk2", "nbfl", "1.6", "1.8",
-    #                "140", "145", "10th", "eterna", "phoenix"],
-    #     blacklist=[
-    #         "na", "mk1", "nc", "mk3", "nd", "mk4", "pop up", "miata",
-    #         "hardtop", "jante", "piece", "recherche", "demande", "location",
-    #         "accident", "export"
-    #     ]
-    # )
+        searches.sort(key=sort_key)
 
-    # # --- Ford Focus RS MK2 ---
-    # # Production 2009-2011 (Le 5 cylindres 2.5L)
-    # FOCUS_RS_MK2 = SearchManager.build_params(
-    #     "focus rs", min_year="2009", max_year="2011")
-    # SearchManager.create_search(
-    #     name="Ford Focus RS MK2",
-    #     lbc_params=FOCUS_RS_MK2,
-    #     whitelist=["mk2", "305", "2.5", "500", "5 cylindres"],
-    #     blacklist=[
-    #         "mk1", "mk3", "st", "st225", "diesel", "tdci", "titanium", "ghia", "trend",
-    #         "ecoboost", "2.3", "2.0", "1.6", "look rs", "kit rs", "replica", "pack rs",
-    #         "jante", "piece", "recherche", "demande", "accident", "export", "ligne"
-    #     ]
-    # )
-
-
-if __name__ == "__main__":
-    main()
+        return searches[0] if searches else None
 
 
 ==================================================
 FILE_PATH: core\__init__.py
 ==================================================
 
+
+==================================================
+FILE_PATH: docs\bug_list.txt
+==================================================
+-> clique graphique details Searches --> detaisl annonce ko ! 
+
+-> detaisl annonce : Amelioration visibilité estimation eco --> rouge/verte pour gain perte
+-> detaisl annonce : Pas besoin de prix virtuel plus mettre prix annonce / reparation estimé /cote marché --> gain/perte
+-> detaisl annonce : details des chiffrage des reparation estimé dans estimation eco 
+
+==================================================
+FILE_PATH: docs\desc_tech_frontend.txt
+==================================================
+Architecture Globale (Layout) : L'interface doit comporter un bandeau supérieur (via streamlit-option-menu) présent sur toutes les pages pour la navigation :
+
+Home
+
+Details Searches
+
+Details Ads
+
+Searches Manager
+
+Settings
+
+Spécifications des Pages (Vue d'ensemble) :
+
+1. Page HOME (Dashboard Principal) Organisation en 3 blocs verticaux :
+
+Bloc 1 (Overview) :
+
+Une table des recherches actives (Colonnes : Nom, Liste White/Black, Année, ID, Dernier Scan). Le nom doit être cliquable et rediriger vers "Details Searches".
+
+Un PieChart à côté : Répartition des annonces par statut (ACTIVE, SCAM, SOLD).
+
+Bloc 2 (Pépites & Opportunités) :
+
+Deux tables filtrables côte à côte (Layout 2 colonnes). Style inspiré de "Movies most beloved".
+
+Contenu : Nom (lien vers "Details Ads"), Prix, Gain potentiel, Note finale, Note brute, Indice de confiance.
+
+Indice de confiance : Jauges de couleur (dégradé Rouge -> Vert).
+
+Table Gauche (Pépites Potentielles) : Filtrée sur Note finale > X (X réglable via un slider 0-100).
+
+Table Droite : Toutes les annonces considérées comme "Pépites".
+
+Bloc 3 (Logs) :
+
+Affichage pleine largeur des logs du worker en bas de page.
+
+2. Page DETAILS SEARCHES (Analyse par Recherche) Accessible via le menu ou clic depuis la Home (pré-sélectionne la recherche concernée).
+
+Header : Sélecteur de recherche (Dropdown).
+
+KPIs :
+
+PieChart : Répartition par statut pour cette recherche spécifique.
+
+Tuile (Metric) : Affichage du R² de la dernière régression marché.
+
+Graphique Central (Scatter Plot interactif) :
+
+Axe X : Kilométrage / Axe Y : Prix.
+
+Formes : Rond (Active), Croix (Sold), Carré (Scam).
+
+Couleurs (Note Finale) : Gradient 0 (Rouge foncé) -> 100 (Vert fluo). Annonces grises pour le sold, Scam en noir.
+
+Interaction : Hover affiche les détails du calcul (3 piliers + K global). Clic redirige vers "Details Ads".
+
+Tableau : Liste complète des annonces de la recherche sélectionnée.
+
+3. Page DETAILS ADS (Fiche Annonce) Accessible via les graphiques ou liens. Design détaillé et stylé.
+
+Header : ID LBC, URL LBC, Titre.
+
+AI Summary : Résumé généré par l'IA (ai_analysis).
+
+Infos Clés : Statut, Date publication, Last seen, Indicateur Favori (Icone).
+
+Détails Vendeur : Nom, Note, Nombre d'avis.
+
+Détails Véhicule : Prix, Code postal, Année, Carburant, Boîte, Puissance.
+
+Analyse Prix : Graphique historique des prix.
+
+Section Évaluation :
+
+Détail du calcul de base (3 piliers).
+
+Détail des coefficients de confiance K (avec points soulevés par l'IA).
+
+Estimation économique : Prix annonce vs Prix marché vs Coût réparation = Gain/Perte.
+
+Actions : Boutons "Favori/Unfav" et "Flag for deletion" (Exclure manuellement).
+
+4. Page SEARCHES MANAGER
+
+Liste de toutes les recherches (tous statuts).
+
+Toggle pour Activer/Désactiver une recherche.
+
+forcé un scan
+
+Formulaire de création de nouvelle recherche.
+
+5. Page SETTINGS
+
+Réglage fréquence de mise à jour.
+
+Configuration du SCORING_CONFIG.
+
+==================================================
+FILE_PATH: docs\last_sprint.md
+==================================================
+### 🚀 2. Plan d'Action Final (Intégrant le Reset & l'Automatisation)
+
+Ce plan est votre feuille de route définitive pour terminer le projet.
+
+### 🏗️ PHASE 1 : Architecture & Configuration (Fondations)
+
+*Objectif : Rendre le bot configurable sans toucher au code.*
+
+- **1.1. Créer le `ConfigManager` (Nouveau Fichier) :**
+    - Créer `core/config_manager.py`.
+    - y déplacer le dictionnaire `SCORING_CONFIG` actuel  comme constante `DEFAULT_CONFIG`.
+    - Implémenter `load_config()` : charge depuis un JSON s'il existe, sinon renvoie `DEFAULT_CONFIG`.
+    - Implémenter `save_config(new_config)` : écrit dans le JSON.
+    - Implémenter `reset_to_default()` : supprime le JSON (le système retombera sur `DEFAULT_CONFIG`).
+- **1.2. Refactoring Config :**
+    - Mettre à jour `ai_analyst.py`, `price_engine.py` et `frontend/data_loader.py` pour qu'ils utilisent `ConfigManager.get_config()` au lieu d'importer la constante statique.
+
+### 🧠 PHASE 2 : Intelligence du Worker (Automatisation)
+
+*Objectif : Scannez intelligemment pour éviter le ban.*
+
+- **2.1. Stratégie "Least Recently Updated" :**
+    - Dans `SearchManager`, créer une méthode `get_oldest_active_search()` :
+        - Liste toutes les recherches actives.
+        - Trie par `last_run_at` (les `None` ou les dates les plus anciennes en premier).
+        - Renvoie uniquement l'ID de la recherche gagnante.
+- **2.2. Mode "Smart Single Run" dans `main.py` :**
+    - Modifier `main.py` pour accepter un argument (ex: `-smart`).
+    - Si `-smart` est présent : le script récupère **une seule** recherche (via 2.1), la traite, et s'arrête.
+- **2.3. Le Scheduler (Script de lancement) :**
+    - Créer un script `scheduler.py` (ou `auto_run.py`) à la racine.
+    - Boucle infinie (`while True`):
+        1. Charge la config pour lire `min_interval` et `max_interval` (ex: 30 min / 120 min).
+        2. Calcule un temps d'attente aléatoire (`random.randint`).
+        3. Attend (`time.sleep`).
+        4. Lance le worker : `subprocess.run(["python", "main.py", "--smart"])`.
+
+### 🖥️ PHASE 3 : Interface Utilisateur (Finalisation UX)
+
+*Objectif : Remplacer les placeholders par les vrais contrôles.*
+
+- **3.1. Page Settings (`pages/4_⚙️_Settings.py`) :**
+    - Connecter au `ConfigManager`.
+    - Ajouter les Sliders pour les poids (Deal/Confiance/Produit).
+    - Ajouter les inputs pour l'automatisation (Intervalle Min/Max en minutes).
+    - **Bouton "💾 Sauvegarder"** : appelle `save_config`.
+    - **Bouton "revenir aux réglages d'usine"** : appelle `reset_to_default` puis recharge la page.
+- **3.2. Page Searches Manager (`pages/3_🎛️_Searches_Manager.py`) :**
+    - Activer le bouton "Créer" (Formulaire).
+    - Activer le Toggle Actif/Inactif.
+    - Activer le bouton "Scan manuel" (lance `main.py` sur cette recherche spécifique).
+
+### 🛡️ PHASE 4 : Robustesse & Nettoyage
+
+- **4.1. Circuit Breaker Scraper :** Si erreur 403, arrêt d'urgence du script pour 30min.
+- **4.2. Clean Code :** Suppression du code mort (Phase de confirmation).
+
+==================================================
+FILE_PATH: docs\white paper.txt
+==================================================
+📘 Projet : Scraper "LBC Pépite Hunter"
+Objectif : Détecter automatiquement les véhicules sous-cotés (Pépites) en filtrant les arnaques et les véhicules à problèmes via une analyse hybride (Mathématique + IA).
+1. Stratégie de Sourcing (L'Entonnoir)
+Nous adoptons une stratégie de "Chasseur" pour capturer les annonces mal référencées.
+A. Le Filet Large (Configuration LBC)
+Ne pas utiliser le filtre "Modèle" de LeBonCoin, mais la recherche textuelle dans la catégorie Voiture.
+URL Base : Catégorie = Voitures (2) | Prix Min = 1000€ (Évite les pièces) | Énergie & Boîte fixés.
+Recherche Texte : Juste le nom du modèle (ex: "Golf").
+Année : Plage définie (ex: 2013-2020).
+B. Le Tamis (Filtrage Application)
+Ton script applique ces filtres dès la réception du HTML pour jeter les déchets.
+1.
+Blacklist (Trash) : Si titre contient : pneu, jante, location, recherche, accident, export, pour pièce. -> POUBELLE.
+2.
+Whitelist (Target) : Si titre ne contient PAS le modèle cible ou ses variantes (ex: golf 7, golf vii, golf VII) -> POUBELLE.
+2. Le Pipeline de Données (ETL)
+L'ordre des opérations est critique pour ne pas fausser les statistiques de marché.
+1.
+EXTRACT & CLEAN : Scraping, application des Black/Whitelists, normalisation des données (Km, Année, CP).
+2.
+ENRICHISSEMENT (IA/Regex) :
+Appel Gemini 1.5 Flash (Prompt : Extraction JSON des Frais, Modifs, État).
+Calcul des Coeffs de Risque (K 
+Arnaque
+​
+ , K 
+Meca
+​
+ ).
+3.
+FILTRE STATISTIQUE (Veto) :
+Si K 
+Arnaque
+​
+ <0.5 (Risque arnaque) OU Prix<Seuil 
+Aberrant
+​
+  : Exclure du calcul de cote.
+4.
+MATH (Régression) :
+Calcul de la courbe de prix du marché (Prix=f(Km,Ann 
+e
+ˊ
+ e)) uniquement sur les annonces "propres".
+Segmentation par Cluster : Modèle + Génération (déduite de l'année) + Moteur + Boite.
+5.
+SCORING FINAL : Calcul de la note pour toutes les annonces (même les douteuses).
+6.
+LOAD (BDD) : Insert New / Update Price / Mark Sold.
+3. L'Algorithme de Scoring (Le Cœur)
+Le score est une Moyenne Pondérée (Attractivité) multipliée par un Indice de Fiabilité (Réalité).
+La Formule Maîtresse
+Score_{Final} = \underbrace{((S_{Deal} \times 0.5) + (S_{Conf} \times 0.3) + (S_{Prod} \times 0.2))}_{\text{Score Base (0-100)}} \times \underbrace{(K_{Meca} \times K_{Modif} \times K_{Arnaque})}_{\text{Indice Fiabilité (0.0 - 1.0)}}
+A. Les 3 Piliers (Score Base)
+1.
+💰 Pilier Deal (50%) : Basé sur le Prix Virtuel.
+Prix Virtuel = Prix Aiché + Coûts Réparations Chiffrables (Pneus, Freins, Distrib extraits par IA).
+On compare ce Prix Virtuel à la Cote Marché.
+Score : 100/100 si -20% sous la cote. 50/100 si au prix.
+2.
+🤝 Pilier Confiance (30%) :
+Bonus : Ancienneté > 2 ans, Profil Vérifié, Longueur description, Mots clés ("Factures", "Carnet").
+Malus : Profil vide, Description < 10 mots.
+3.
+💎 Pilier Produit (20%) :
+Bonus : Finition haute (S-Line, Carat), Options (Toit ouvrant), Première main.
+B. Les Sanity Checks (Coefficients K)
+Ce sont des multiplicateurs de réduction (1.0−Malus). Ils sanctionnent le RISQUE (non chiffrable).
+1.
+K 
+Meca
+​
+  (Risque Mécanique)
+Contenu : Symptômes flous (bruit, fumée, tremblement), Pas de CT, Voyant moteur.
+Exemple : Voyant allumé = -0.30.
+2.
+K 
+Modif
+​
+  (Risque Tuning)
+Contenu : Stage 1, Reprog, Ligne directe, Kit éthanol, Rabaissement.
+Exemple : Stage 1 = -0.40.
+3.
+K 
+Arnaque
+​
+  (Risque Vendeur)
+Contenu : Arnaque détectée (Mandat cash), Incohérence Géo, Profil créé hier sans avis.
+Kill Switch : Si < 0.3, l'annonce est morte.
+4. Stack Technique & Données
+Stockage (PostgreSQL)
+Utilisation de PostgreSQL pour sa capacité hybride (SQL pour les index/régression + JSONB pour la data flexible).
+Schéma Table ads :
+id (PK), title, price, mileage, year (Colonnes SQL classiques indexées).
+cluster_key (Varchar): ex: "GOLF7_DIESEL_AUTO_150".
+raw_data (JSONB): Données brutes LBC.
+ai_analysis (JSONB): Retour complet de Gemini (Frais, Options, Risques).
+scores (JSONB): Détail des notes ( trust_score, deal_score, k_total).
+status: ACTIVE, SOLD, SCAM.
+IA (Gemini 1.5 Flash)
+Prompt : Mode JSON strict.
+Input : Titre, Prix, Km, Description.
+Output attendu :
+JSON
+{
+  "frais_chiffrables": [{"item": "pneus", "cout": 200}],
+  "risques_meca": ["voyant moteur"],
+  "modifications": ["stage 1"],
+  "options": ["toit ouvrant"]
+}
+
+5. Gestion du Cycle de Vie (Mise à jour)
+1.
+Démarrage script : Charger tous les IDs actifs en mémoire.
+2.
+Pendant le scrape :
+ID inconnu -> INSERT.
+ID connu + Prix identique -> Update last_seen.
+ID connu + Prix différent -> UPDATE prix (Historiser l'ancien) + ALERTE BAISSE PRIX.
+3.
+Fin du script :
+Les IDs en mémoire qui n'ont pas été vus dans le scrape → UPDATE status = 'SOLD'.
 
 ==================================================
 FILE_PATH: docs\whitepaper_traceability.md
@@ -2479,7 +3059,7 @@ import os
 from core.db_client import DatabaseClient
 from core.models import Ad
 from core.search_manager import SearchManager
-from core.scoring_config import SCORING_CONFIG
+from core.config_manager import ConfigManager  # <--- NOUVEAU
 from core.app_config import load_app_config
 import logging
 
@@ -2494,6 +3074,9 @@ def load_home_data():
     session = db.Session()
 
     try:
+        # Charger la config dynamique
+        config = ConfigManager.get_config()
+
         # 1. Stats globales
         status_counts = {"ACTIVE": 0, "SOLD": 0, "SCAM": 0}
         ads_all = session.query(Ad.status, Ad.user_status).all()
@@ -2509,8 +3092,7 @@ def load_home_data():
         query_active = session.query(Ad).filter(
             Ad.status == "ACTIVE", Ad.user_status != "TRASH")
 
-        # Récupération des POIDS FRACTIONNELS (0.5, 0.3, 0.2)
-        weights = SCORING_CONFIG.get(
+        weights = config.get(
             "weights", {"deal": 0.5, "conf": 0.3, "prod": 0.2})
         w_deal = weights.get("deal", 0.5)
         w_conf = weights.get("conf", 0.3)
@@ -2523,27 +3105,26 @@ def load_home_data():
             fin = scores.get("financial", {})
             sanity = scores.get("sanity_checks", {})
 
-            # A. CALCUL GAIN/PERTE (Sécurisé)
+            # A. CALCUL GAIN/PERTE
             market_price = fin.get("market_estimation", 0)
             if market_price and market_price > 0:
                 virtual_price = fin.get("virtual_price", ad.price)
                 gain = market_price - virtual_price
             else:
-                gain = 0  # Evite les pertes négatives si aucune cote marché n'est disponible
+                gain = 0
 
-            # B. CALCUL NOTE BRUTE (Somme Pondérée Directe)
+            # B. CALCUL NOTE BRUTE
             s_deal = base.get("deal", 50)
             s_conf = base.get("conf", 50)
             s_prod = base.get("prod", 0)
 
             try:
-                # Moyenne pondérée par poids fractionnels
                 note_brute = (s_deal * w_deal) + \
                     (s_conf * w_conf) + (s_prod * w_prod)
             except:
                 note_brute = 0
 
-            # C. CALCUL INDICE K (K Final)
+            # C. CALCUL INDICE K
             k_meca = sanity.get("k_meca", 1.0)
             k_modif = sanity.get("k_modif", 1.0)
             k_arnaque = sanity.get("k_arnaque", 1.0)
@@ -2573,16 +3154,12 @@ def load_home_data():
             df_searches["Blacklist"] = df_searches["filters"].apply(
                 lambda x: ", ".join(x.get("blacklist", [])))
 
-            # FIX FINAL ANNEES : Extraction de regdate depuis lbc_params
             def get_year_display(lbc_params_dict):
                 if not isinstance(lbc_params_dict, dict):
                     return "Tout"
-
                 regdate_val = lbc_params_dict.get("regdate")
-
                 if regdate_val and str(regdate_val).strip():
                     return str(regdate_val).strip()
-
                 min_y = lbc_params_dict.get("min_year")
                 max_y = lbc_params_dict.get("max_year")
                 if min_y and max_y:
@@ -2591,20 +3168,17 @@ def load_home_data():
                     return f"> {min_y}"
                 if max_y:
                     return f"< {max_y}"
-
                 return "Tout"
 
-            # Utilisation de la colonne 'lbc_params' pour l'extraction
             df_searches["Année"] = df_searches["lbc_params"].apply(
                 get_year_display)
-
-            df_searches = df_searches[["name", "id", "Année",
-                                       "last_run_at", "Whitelist", "Blacklist"]]
+            df_searches = df_searches[[
+                "name", "id", "Année", "last_run_at", "Whitelist", "Blacklist"]]
 
         return status_counts, df_ads, df_searches
 
     except Exception as e:
-        logger.exeption(f"Erreur Data Loader: {e}")
+        logger.exception(f"Erreur Data Loader: {e}")
         return {"ACTIVE": 0}, pd.DataFrame(), pd.DataFrame()
     finally:
         session.close()
@@ -2612,16 +3186,16 @@ def load_home_data():
 
 @st.cache_data(ttl=10)
 def load_search_details_data(search_id):
-    """Charge les données détaillées pour une recherche spécifique, incluant toutes les annonces (peu importe le statut) et le R²."""
+    """Charge les données détaillées pour une recherche spécifique."""
     db = DatabaseClient()
     session = db.Session()
 
     try:
-        # 1. Récupérer l'objet de recherche pour le R²
+        # Charger config
+        config = ConfigManager.get_config()
+
         search_obj = SearchManager.get_search(search_id)
-        # Assurer la lecture du R²
         if search_obj:
-            # On utilise .get() pour accéder aux clés du dictionnaire de manière sécurisée
             model_meta = search_obj.get("model_meta", {})
             r2_score = model_meta.get("r2_score", "N/A")
             search_name = search_obj.get("name", "Recherche Inconnue")
@@ -2629,12 +3203,10 @@ def load_search_details_data(search_id):
             r2_score = "N/A"
             search_name = "Recherche Inconnue"
 
-        # 2. Récupérer toutes les annonces liées à cette recherche
         query_ads = session.query(Ad).filter(
             Ad.found_by_searches.contains([search_id]))
 
-        # Récupération des POIDS FRACTIONNELS (0.5, 0.3, 0.2)
-        weights_dict = SCORING_CONFIG.get("weights", {})
+        weights_dict = config.get("weights", {})
         w_deal = weights_dict.get("deal", 0.5)
         w_conf = weights_dict.get("conf", 0.3)
         w_prod = weights_dict.get("prod", 0.2)
@@ -2647,7 +3219,6 @@ def load_search_details_data(search_id):
             fin = scores.get("financial", {})
             sanity = scores.get("sanity_checks", {})
 
-            # Déterminer le statut final pour le graphique
             status = ad.status
             if ad.user_status == "SCAM_MANUAL" or status == "SCAM":
                 status = "SCAM"
@@ -2656,7 +3227,6 @@ def load_search_details_data(search_id):
             else:
                 status = "ACTIVE"
 
-            # A. CALCUL GAIN/PERTE
             market_price = fin.get("market_estimation", 0)
             if market_price and market_price > 0:
                 virtual_price = fin.get("virtual_price", ad.price)
@@ -2664,19 +3234,16 @@ def load_search_details_data(search_id):
             else:
                 gain = 0
 
-            # B. CALCUL NOTE BRUTE
             s_deal = base.get("deal", 50)
             s_conf = base.get("conf", 50)
             s_prod = base.get("prod", 0)
 
             try:
-                # Somme Pondérée Directe (Base de la Note Finale)
                 note_brute = (s_deal * w_deal) + \
                     (s_conf * w_conf) + (s_prod * w_prod)
             except:
                 note_brute = 0
 
-            # C. CALCUL INDICE K (K Final)
             k_meca = sanity.get("k_meca", 1.0)
             k_modif = sanity.get("k_modif", 1.0)
             k_arnaque = sanity.get("k_arnaque", 1.0)
@@ -2689,14 +3256,12 @@ def load_search_details_data(search_id):
                 "Gain": gain,
                 "Kilométrage": ad.mileage,
                 "Année": ad.year,
-                "Statut": status,  # Statut pour les filtres et graphiques
+                "Statut": status,
                 "Note Brute": int(note_brute),
                 "Indice K": int(k_final * 100),
-                # Le score total inclut l'application des K
                 "Score Final": scores.get("total", 0),
                 "Favori": ad.is_favorite,
                 "URL": ad.url,
-                # Détails pour le Hover Plot
                 "Deal Score": s_deal,
                 "Conf Score": s_conf,
                 "Prod Score": s_prod,
@@ -2707,18 +3272,16 @@ def load_search_details_data(search_id):
 
         df_ads = pd.DataFrame(raw_data)
 
-        # S'assurer que les colonnes sont numériques pour les graphiques
         if not df_ads.empty:
             df_ads["Prix"] = df_ads["Prix"].astype(float)
             df_ads["Kilométrage"] = df_ads["Kilométrage"].astype(float)
 
-        # Calculer le count status pour le Pie Chart
         status_counts = df_ads["Statut"].value_counts().to_dict()
 
         return search_name, r2_score, status_counts, df_ads
 
     except Exception as e:
-        logger.exeption(f"Erreur Load Search Details: {e}")
+        logger.exception(f"Erreur Load Search Details: {e}")
         return "Erreur de Chargement", "N/A", {"ACTIVE": 0}, pd.DataFrame()
     finally:
         session.close()
@@ -2732,9 +3295,6 @@ def load_ad_details_data(ad_id: str):
 
 @st.cache_data(ttl=load_app_config().streamlit.cache_ttl_seconds)
 def load_ads_selector(limit: int = 200):
-    """
-    Retourne une liste d'annonces pour le sélecteur de la page Details Ads.
-    """
     db = DatabaseClient()
     return db.list_ads_for_selector(limit=limit)
 
@@ -3516,154 +4076,282 @@ main()
 FILE_PATH: pages\3_🎛️_Searches_Manager.py
 ==================================================
 import streamlit as st
+import subprocess
+import sys
+import pandas as pd
+import time
+from datetime import datetime
 from frontend.layout import render_header
 from core.search_manager import SearchManager
 
 # -----------------------------------------------------------------------------
 # CONFIG
 # -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="LBC Hunter - Gestion des Recherches",
-    page_icon="🎛️",
-    layout="wide"
-)
+st.set_page_config(page_title="LBC Hunter - Gestion Recherches",
+                   page_icon="🎛️", layout="wide")
 render_header("Searches Manager")
 
 st.title("🎛️ Gestion des Recherches")
-st.caption("Configuration et pilotage des recherches Leboncoin")
 
 # -----------------------------------------------------------------------------
-# DATA
+# HELPER : TOGGLE ACTIVE
 # -----------------------------------------------------------------------------
+
+
+def toggle_search_state(search_id, current_state):
+    """
+    Change le statut actif/inactif d'une recherche.
+    Note: Idéalement, cette méthode devrait être dans SearchManager.
+    """
+    s = SearchManager.get_search(search_id)
+    if s:
+        s['active'] = not current_state
+        # On utilise la méthode privée _save_file (accessible car on est en python)
+        # Pour faire plus propre, on ajoutera une méthode publique plus tard.
+        SearchManager._save_file(s)
+
+# -----------------------------------------------------------------------------
+# MODAL DE CRÉATION
+# -----------------------------------------------------------------------------
+
+
+@st.dialog("Nouvelle Recherche")
+def show_create_modal():
+    with st.form("create_search_form"):
+        name = st.text_input("Nom de la recherche (ex: Golf 7 GTI)")
+        search_text = st.text_input("Mots-clés LBC (ex: golf gti)")
+
+        c1, c2 = st.columns(2)
+        min_p = c1.number_input("Prix Min", value=1000, step=500)
+        max_p = c2.number_input("Prix Max", value=20000, step=500)
+
+        c3, c4 = st.columns(2)
+        min_y = c3.number_input("Année Min", value=2010, step=1)
+        max_y = c4.number_input("Année Max", value=2024, step=1)
+
+        st.markdown("**Filtres Avancés**")
+        whitelist_str = st.text_input(
+            "Whitelist (mots obligatoires, séparés par virgule)", placeholder="gti, performance")
+        blacklist_str = st.text_input(
+            "Blacklist (mots interdits, séparés par virgule)", placeholder="tdi, diesel, accident")
+
+        if st.form_submit_button("Créer"):
+            if not name or not search_text:
+                st.error("Nom et Mots-clés obligatoires.")
+            else:
+                # Parsing listes
+                whitelist = [w.strip()
+                             for w in whitelist_str.split(",") if w.strip()]
+                blacklist = [b.strip()
+                             for b in blacklist_str.split(",") if b.strip()]
+
+                # Build Params
+                lbc_params = SearchManager.build_params(
+                    search_text,
+                    min_year=str(min_y), max_year=str(max_y),
+                    min_price=str(min_p), max_price=str(max_p)
+                )
+
+                SearchManager.create_search(
+                    name, lbc_params, whitelist, blacklist)
+                st.success(f"Recherche '{name}' créée !")
+                st.rerun()
+
+
+# -----------------------------------------------------------------------------
+# TABLEAU DE BORD
+# -----------------------------------------------------------------------------
+col_create, _ = st.columns([1, 5])
+if col_create.button("➕ Créer une recherche"):
+    show_create_modal()
+
 searches = SearchManager.list_searches()
 
 if not searches:
-    st.info("Aucune recherche configurée pour le moment.")
+    st.info("Aucune recherche. Créez-en une !")
     st.stop()
 
-# -----------------------------------------------------------------------------
-# TABLE (lecture seule pour l’instant)
-# -----------------------------------------------------------------------------
-st.subheader("📡 Recherches existantes")
-
-st.dataframe(
-    searches,
-    use_container_width=True,
-    hide_index=True
-)
-
-# -----------------------------------------------------------------------------
-# PLACEHOLDER ACTIONS
-# -----------------------------------------------------------------------------
+# --- TABLEAU INTERACTIF ---
+# On affiche les recherches sous forme de cartes ou tableau avec actions
 st.divider()
-st.subheader("🚧 Actions (à venir)")
 
-col1, col2, col3, col4 = st.columns(4)
+for s in searches:
+    with st.container(border=True):
+        c1, c2, c3, c4, c5 = st.columns([0.5, 2, 2, 1, 1])
 
-with col1:
-    st.button("➕ Créer une recherche", disabled=True)
+        # 1. Statut (Icone)
+        is_active = s.get("active", True)
+        icon = "🟢" if is_active else "⏸️"
+        c1.markdown(f"### {icon}")
 
-with col2:
-    st.button("✏️ Modifier", disabled=True)
+        # 2. Nom & ID
+        with c2:
+            st.markdown(f"**{s['name']}**")
+            st.caption(f"ID: `{s['id']}`")
 
-with col3:
-    st.button("⏸️ Activer / Désactiver", disabled=True)
+        # 3. Détails (Prix / Année / Keywords)
+        with c3:
+            p = s.get('lbc_params', {})
+            txt = p.get('text', 'N/A')
+            year = p.get('regdate', 'N/A')
+            st.text(f"🔍 {txt} | 📅 {year}")
 
-with col4:
-    st.button("▶️ Lancer un scan", disabled=True)
+        # 4. Toggle Active
+        with c4:
+            # On utilise un key unique pour éviter les conflits
+            btn_label = "Désactiver" if is_active else "Activer"
+            if st.button(btn_label, key=f"btn_toggle_{s['id']}", use_container_width=True):
+                toggle_search_state(s['id'], is_active)
+                st.rerun()
 
-st.info(
-    "Cette page est un **placeholder fonctionnel**.\n\n"
-    "Les actions seront activées lors du P1 :\n"
-    "- création / édition de recherches\n"
-    "- activation/désactivation\n"
-    "- déclenchement manuel du worker"
-)
+        # 5. Scan Manuel
+        with c5:
+            if st.button("▶️ Scan", key=f"btn_scan_{s['id']}", use_container_width=True, disabled=not is_active):
+                with st.spinner(f"Scan de '{s['name']}' en cours..."):
+                    try:
+                        # Lancement du subprocess main.py avec l'argument --search_id
+                        subprocess.run(
+                            [sys.executable, "main.py", "--search_id", s['id']], check=True)
+                        st.success("Terminé !")
+                        time.sleep(1)
+                        # On recharge pour mettre à jour la date de last_run
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erreur: {e}")
 
 
 ==================================================
 FILE_PATH: pages\4_⚙️_Settings.py
 ==================================================
 import streamlit as st
+import time
 from frontend.layout import render_header
+from core.config_manager import ConfigManager
 
 # -----------------------------------------------------------------------------
-# CONFIG
+# CONFIG & HEADER
 # -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="LBC Hunter - Paramètres",
-    page_icon="⚙️",
-    layout="wide"
-)
+st.set_page_config(page_title="LBC Hunter - Paramètres",
+                   page_icon="⚙️", layout="wide")
 render_header("Settings")
 
 st.title("⚙️ Paramètres")
-st.caption("Configuration globale de LBC Hunter")
+st.caption("Ajustez la sensibilité de l'algorithme et le comportement du robot.")
+
+# Chargement de la config actuelle
+config = ConfigManager.get_config()
+default_weights = config.get(
+    "weights", {"deal": 0.5, "conf": 0.3, "prod": 0.2})
+default_automation = config.get(
+    "automation", {"min_interval_minutes": 30, "max_interval_minutes": 90})
 
 # -----------------------------------------------------------------------------
-# WARNING
+# FORMULAIRE
 # -----------------------------------------------------------------------------
-st.warning(
-    "⚠️ Cette page est un **placeholder**.\n\n"
-    "À terme, **tous les paramètres de l'application** "
-    "(scoring, IA, scraping, performance, sécurité) "
-    "seront centralisés ici."
-)
+with st.form("settings_form"):
 
-# -----------------------------------------------------------------------------
-# SECTIONS (structure cible)
-# -----------------------------------------------------------------------------
-with st.expander("🧠 Intelligence Artificielle", expanded=False):
-    st.markdown("""
-    **À venir :**
-    - activation / désactivation de l’IA
-    - seuils de sévérité (mécanique, modifications, arnaque)
-    - paramètres du modèle Gemini
-    """)
+    # --- SECTION 1 : SCORING ---
+    st.subheader("📊 Pondération du Scoring (Total = 1.0)")
 
-with st.expander("📊 Scoring & Pondérations", expanded=False):
-    st.markdown("""
-    **À venir :**
-    - poids Deal / Confiance / Produit
-    - règles de veto (annonces exclues du marché)
-    - seuils de pénalité / bonus
-    """)
+    col1, col2, col3 = st.columns(3)
 
-with st.expander("🌐 Scraping & Réseau", expanded=False):
-    st.markdown("""
-    **À venir :**
-    - délais min / max
-    - timeouts
-    - user-agents
-    - fréquence des scans
-    """)
+    with col1:
+        w_deal = st.slider(
+            "💰 Poids Deal (Prix/Marché)",
+            min_value=0.0, max_value=1.0,
+            value=float(default_weights.get("deal", 0.5)),
+            step=0.05,
+            help="Importance du prix par rapport à la cote."
+        )
 
-with st.expander("⚡ Performance & Cache", expanded=False):
-    st.markdown("""
-    **À venir :**
-    - TTL du cache Streamlit
-    - pagination / limites UI
-    - stratégie de rafraîchissement
-    """)
+    with col2:
+        w_conf = st.slider(
+            "🤝 Poids Confiance (Vendeur)",
+            min_value=0.0, max_value=1.0,
+            value=float(default_weights.get("conf", 0.3)),
+            step=0.05,
+            help="Importance de la qualité de l'annonce et du profil vendeur."
+        )
 
-with st.expander("🔐 Sécurité & Secrets", expanded=False):
-    st.markdown("""
-    **À venir :**
-    - état des clés API
-    - configuration DB (lecture seule)
-    - avertissements sécurité
-    """)
+    with col3:
+        w_prod = st.slider(
+            "💎 Poids Produit (Options)",
+            min_value=0.0, max_value=1.0,
+            value=float(default_weights.get("prod", 0.2)),
+            step=0.05,
+            help="Importance de la finition et des options détectées."
+        )
 
-# -----------------------------------------------------------------------------
-# FOOTER
-# -----------------------------------------------------------------------------
-st.info(
-    "🎯 Objectif P1 :\n"
-    "- une **config unique** (dataclass / pydantic)\n"
-    "- persistée (JSON)\n"
-    "- modifiable ici via l’UI\n"
-    "- sans **aucune** valeur codée en dur ailleurs"
-)
+    total_weights = w_deal + w_conf + w_prod
+    if abs(total_weights - 1.0) > 0.01:
+        st.warning(
+            f"⚠️ La somme des poids fait {total_weights:.2f} (Idéalement 1.0)")
+    else:
+        st.success("✅ La somme des poids est correcte (1.0)")
+
+    st.divider()
+
+    # --- SECTION 2 : AUTOMATISATION ---
+    st.subheader("🤖 Automatisation (Scheduler)")
+    st.caption(
+        "Définit l'intervalle de temps aléatoire entre deux scans automatiques.")
+
+    c_auto1, c_auto2 = st.columns(2)
+    with c_auto1:
+        min_interval = st.number_input(
+            "⏱️ Intervalle Min (minutes)",
+            min_value=5, max_value=1440,
+            value=int(default_automation.get("min_interval_minutes", 30))
+        )
+    with c_auto2:
+        max_interval = st.number_input(
+            "⏱️ Intervalle Max (minutes)",
+            min_value=5, max_value=1440,
+            value=int(default_automation.get("max_interval_minutes", 90))
+        )
+
+    if min_interval >= max_interval:
+        st.error("⚠️ L'intervalle min doit être inférieur au max.")
+
+    st.divider()
+
+    # --- ACTIONS ---
+    col_save, col_reset = st.columns([1, 5])
+
+    with col_save:
+        submitted = st.form_submit_button(
+            "💾 Sauvegarder", type="primary", use_container_width=True)
+
+# LOGIQUE DE SAUVEGARDE (Hors du layout form pour gérer le reset proprement)
+if submitted:
+    new_config = config.copy()
+
+    # Update Weights
+    new_config["weights"] = {
+        "deal": round(w_deal, 2),
+        "conf": round(w_conf, 2),
+        "prod": round(w_prod, 2)
+    }
+
+    # Update Automation
+    new_config["automation"] = {
+        "min_interval_minutes": int(min_interval),
+        "max_interval_minutes": int(max_interval)
+    }
+
+    ConfigManager.save_config(new_config)
+    st.toast("Configuration sauvegardée avec succès !", icon="✅")
+    time.sleep(1)
+    st.rerun()
+
+# BOUTON RESET (Hors du form)
+st.markdown("---")
+with st.expander("Danger Zone"):
+    if st.button("♻️ Réinitialiser aux paramètres d'usine"):
+        ConfigManager.reset_to_default()
+        st.toast("Paramètres d'usine rétablis.", icon="♻️")
+        time.sleep(1)
+        st.rerun()
 
 
 ==================================================
@@ -3674,7 +4362,7 @@ FILE_PATH: searches\ford_focus_rs_mk2_d59147d7-669e-4e8c-9bfc-c461c18beb4a.json
     "name": "Ford Focus RS MK2",
     "active": true,
     "created_at": "2025-12-14T01:20:16.470833",
-    "last_run_at": "2025-12-14T23:07:08.150615",
+    "last_run_at": "2025-12-15T23:28:33.898675",
     "lbc_params": {
         "category": "2",
         "text": "focus rs",
@@ -3718,9 +4406,86 @@ FILE_PATH: searches\ford_focus_rs_mk2_d59147d7-669e-4e8c-9bfc-c461c18beb4a.json
         ]
     },
     "model_meta": {
-        "r2_score": 0.9
+        "r2_score": 0.88
     }
 }
+
+==================================================
+FILE_PATH: tools\auditor_prompt.txt
+==================================================
+# RÔLE ET CONTEXTE
+Tu es un Architecte Logiciel Senior, Expert en Sécurité et Auditeur Technique (Python). Je t'engage pour une mission critique : réaliser un audit de mon projet (code source dans le ZIP joint) en le confrontant strictement à ses documents de référence (White Paper et Specs UX inclus).
+
+# NOTE SPÉCIALE SUR L'UX (PLACEHOLDERS)
+Attention : Le développement est en cours. Certaines fonctionnalités UX visuelles sont actuellement à l'état de "Placeholders" dans le code.
+- NE LES SIGNALE PAS comme des "Non-conformités critiques" ou des erreurs.
+- À LA PLACE : Vérifie si l'architecture backend actuelle (modèles de données, API, schémas) est prête à supporter ces fonctionnalités futures.
+- Dans ta matrice, marque-les comme "WIP (Work In Progress)".
+
+# RÈGLES ANTI-HALLUCINATION (CRITIQUE & NON-NÉGOCIABLE)
+1. ANCRAGE STRICT : Tout constat doit être justifié par une référence explicite au fichier et à la ligne concernée (ex: "Vu dans `src/auth.py` ligne 45" ou "Page 12 du White Paper").
+2. PAS DE SUPPOSITION : Si une fonctionnalité décrite dans le White Paper n'est pas trouvée, note-la explicitement comme "MANQUANTE".
+3. PÉRIMÈTRE CLOS : Base tes analyses de conformité UNIQUEMENT sur les documents fournis.
+4. HONNÊTETÉ INTELLECTUELLE : Si tu ne trouves pas une information, écris "NON DÉTERMINÉ".
+
+# OBJECTIFS DE L'AUDIT
+Analyse les documents fournis selon ces 4 axes détaillés :
+
+1. CONFORMITÉ FONCTIONNELLE (Code vs White Paper) :
+   - Compare point par point les promesses du White Paper avec l'implémentation réelle.
+   - Fournis une matrice de couverture avec preuves.
+
+2. AUDIT UX & SPEC (Code vs UX Specs) :
+   - Vérifie si l'architecture backend permet de servir les parcours utilisateurs décrits, même si le front est en placeholder.
+
+3. ROBUSTESSE & REDONDANCE (PRIORITÉ HAUTE) :
+   - Identifie les SPOF (Single Point of Failure).
+   - Analyse la gestion des erreurs : le système est-il résilient ?
+   - Simule mentalement des pannes critiques (coupure DB, API tierce HS).
+
+4. QUALITÉ DU CODE & DETTE TECHNIQUE :
+   - Identifie les anti-patterns, le code "spaghetti", et les failles de sécurité.
+
+# MÉTHODOLOGIE D'INTERVENTION FUTURE (POUR INFO)
+Note bien ceci pour la suite (ne pas appliquer maintenant) :
+Une fois l'audit validé, nous passerons à la correction "Zéro Régression".
+- Nous traiterons les problèmes un par un.
+- Tu agiras comme un "Pair Programmer" prudent.
+- Pour CHAQUE modification, tu fourniras un protocole de test (Test Témoin) à lancer AVANT et APRÈS.
+
+# LIVRABLES ATTENDUS POUR CETTE PREMIÈRE RÉPONSE
+Fournis uniquement le rapport d'audit structuré :
+
+1. **Architecture Perçue** : Résume l'architecture technique vue dans le code (pour valider ta lecture).
+2. **Matrice de Conformité** : Tableau [Fonctionnalité WP | Fichier Code | État (OK/Manquant/WIP) | Preuve/Commentaire Backend].
+3. **Rapport de Robustesse** : Liste des points de fragilité critiques.
+4. **Plan d'Action Unifié & Priorisé (P1 à P3)** :
+   Ce plan doit fusionner deux types de tâches :
+   - A. **Stabilisation** : Correction des bugs, sécurité et SPOF (Dette Technique).
+   - B. **Finalisation** : Étapes concrètes pour terminer les fonctionnalités identifiées comme "WIP" ou "Manquantes" (Dette Fonctionnelle).
+
+Commence par analyser l'archive ZIP. J'attends ton rapport factuel et sourcé.
+
+==================================================
+FILE_PATH: tools\check_models.py
+==================================================
+import google.generativeai as genai
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+api_key = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=api_key)
+
+print("🔍 Liste des modèles disponibles pour ta clé :")
+try:
+    for m in genai.list_models():
+        if 'generateContent' in m.supported_generation_methods:
+            print(f" - {m.name}")
+except Exception as e:
+    print(f"❌ Erreur : {e}")
+
 
 ==================================================
 FILE_PATH: tools\simulate_k.py

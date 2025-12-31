@@ -7,7 +7,7 @@ from sklearn.ensemble import RandomForestRegressor
 
 from .db_client import DatabaseClient
 from .models import Ad
-from .scoring_config import SCORING_CONFIG
+from .config_manager import ConfigManager  # <--- NOUVEAU
 from .search_manager import SearchManager
 
 logger = logging.getLogger(__name__)
@@ -16,15 +16,14 @@ logger = logging.getLogger(__name__)
 class PriceEngine:
     def __init__(self, db_client: DatabaseClient):
         self.db = db_client
+        self.config = ConfigManager.get_config()  # Charge config au démarrage
 
-        params = SCORING_CONFIG["price_engine"]["model_params"]
+        params = self.config["price_engine"]["model_params"]
         self.model = RandomForestRegressor(
             n_estimators=int(params["n_estimators"]),
             random_state=int(params["random_state"]),
         )
         self.is_trained = False
-
-        # MÉMOIRE DU MODÈLE
         self.model_meta: Dict[str, Any] = {
             "features_used": [],
             "imputers": {},
@@ -32,6 +31,9 @@ class PriceEngine:
 
     def get_data_for_search(self, search_id: str) -> pd.DataFrame:
         try:
+            # Recharger la config pour être à jour (au cas où modifiée entre temps)
+            config = ConfigManager.get_config()
+
             rows = self.db.fetch_ads_for_price_training(search_id)
             if not rows:
                 return pd.DataFrame()
@@ -42,7 +44,7 @@ class PriceEngine:
 
             df = df.dropna(subset=["price", "year", "mileage"])
 
-            veto = SCORING_CONFIG["price_engine"].get("veto", {})
+            veto = config["price_engine"].get("veto", {})
             min_k = float(veto.get("min_k_arnaque_for_market", 0.5))
             exclude_user = set(veto.get("exclude_user_status", []))
             exclude_status = set(veto.get("exclude_status", []))
@@ -62,7 +64,7 @@ class PriceEngine:
             if df.empty:
                 return pd.DataFrame()
 
-            # prix aberrant relatif (ratio * médiane/mean)
+            # prix aberrant relatif
             price_floor_ratio = float(veto.get("price_floor_ratio", 0.30))
             price_floor_stat = str(
                 veto.get("price_floor_stat", "median")).lower()
@@ -79,7 +81,7 @@ class PriceEngine:
                 return pd.DataFrame()
 
             # outliers
-            limits = SCORING_CONFIG["price_engine"]["outliers"]
+            limits = config["price_engine"]["outliers"]
             df = df[
                 (df["price"] >= limits["min_price"]) &
                 (df["price"] <= limits["max_price"]) &
@@ -98,7 +100,8 @@ class PriceEngine:
             return pd.DataFrame()
 
     def train(self, search_id: str, df: pd.DataFrame) -> None:
-        training_cfg = SCORING_CONFIG["price_engine"].get("training", {})
+        config = ConfigManager.get_config()
+        training_cfg = config["price_engine"].get("training", {})
         min_samples = int(training_cfg.get("min_samples", 30))
 
         if df is None or df.empty or len(df) < min_samples:
@@ -112,12 +115,10 @@ class PriceEngine:
             SearchManager.update_model_meta(search_id, {"r2_score": "N/A"})
             return
 
-        # 1) FEATURES OBLIGATOIRES
         base_features = ["year", "mileage"]
         final_features = base_features.copy()
 
-        # 2) FEATURES DYNAMIQUES
-        dyn_conf = SCORING_CONFIG["price_engine"]["dynamic_features"]
+        dyn_conf = config["price_engine"]["dynamic_features"]
         for col in dyn_conf.get("candidates", []):
             if col in df.columns:
                 fill_rate = df[col].notna().mean()
@@ -126,22 +127,17 @@ class PriceEngine:
                     self.model_meta["imputers"][col] = median_val
                     df[col] = df[col].fillna(median_val)
                     final_features.append(col)
-                    logger.info(
-                        "Feature retenue: %s (fill_rate=%.0f%%)", col, fill_rate * 100)
                 else:
-                    logger.info(
-                        "Feature rejetée: %s (fill_rate=%.0f%%)", col, fill_rate * 100)
+                    pass
 
         self.model_meta["features_used"] = final_features
 
-        # 3) ENTRAÎNEMENT
         X = df[final_features]
         y = df["price"]
 
         self.model.fit(X, y)
         self.is_trained = True
 
-        # Score R² (sur train, conforme à ton implémentation)
         score = float(self.model.score(X, y))
         logger.info(
             "Modèle entraîné [search=%s] features=%s R²=%.2f", search_id, final_features, score)
@@ -151,14 +147,11 @@ class PriceEngine:
     def predict_price(self, year: int, km: int, hp: int | None = None) -> Optional[float]:
         if not self.is_trained:
             return None
-
         try:
             input_data: Dict[str, Any] = {"year": year, "mileage": km}
-
             for col in self.model_meta["features_used"]:
                 if col in ("year", "mileage"):
                     continue
-
                 if col == "horsepower":
                     input_data[col] = hp if hp is not None else self.model_meta["imputers"].get(
                         col, 0)
@@ -167,14 +160,14 @@ class PriceEngine:
                 self.model_meta["features_used"]]
             predicted = float(self.model.predict(features_df)[0])
             return round(predicted, 2)
-
         except Exception as e:
             logger.exception("Erreur predict_price: %s", e)
             return None
 
     @staticmethod
     def _deal_score_from_ratio(ratio: float) -> float:
-        cfg = SCORING_CONFIG["price_engine"]["scoring"]
+        # Lecture config statique (méthode statique oblige, ou on refait l'appel)
+        cfg = ConfigManager.get_config()["price_engine"]["scoring"]
 
         r_good = float(cfg["good_deal_ratio"])
         r_neutral = float(cfg.get("neutral_ratio", 1.0))
@@ -186,15 +179,14 @@ class PriceEngine:
             return 0.0
 
         if ratio <= r_neutral:
-            # 100 → 50
             return 50.0 + (r_neutral - ratio) * (50.0 / (r_neutral - r_good))
         else:
-            # 50 → 0
             return 50.0 - (ratio - r_neutral) * (50.0 / (r_bad - r_neutral))
 
     def update_deal_scores(self, search_id: str) -> None:
         logger.info("Audit du marché [search=%s]...", search_id)
 
+        # Le config manager est appelé dans get_data et train
         df = self.get_data_for_search(search_id)
         if df.empty:
             logger.warning(
@@ -213,6 +205,10 @@ class PriceEngine:
             ads = self.db.fetch_active_ads_for_deal_update(search_id)
             updates = []
 
+            # Relecture pour avoir les poids à jour
+            config = ConfigManager.get_config()
+            weights = config["weights"]
+
             for ad in ads:
                 year = ad.get("year")
                 mileage = ad.get("mileage")
@@ -224,7 +220,6 @@ class PriceEngine:
                 if not fair_price or fair_price <= 0:
                     continue
 
-                # prix virtuel
                 repair_cost = 0
                 ai_analysis = ad.get("ai_analysis") or {}
                 for frais in ai_analysis.get("frais_chiffrables", []):
@@ -251,7 +246,6 @@ class PriceEngine:
                 # Recalcul total
                 s_conf = float(current_scores.get("base", {}).get("conf", 50))
                 s_prod = float(current_scores.get("base", {}).get("prod", 0))
-                weights = SCORING_CONFIG["weights"]
 
                 total = (s_deal * weights["deal"]) + (s_conf *
                                                       weights["conf"]) + (s_prod * weights["prod"])

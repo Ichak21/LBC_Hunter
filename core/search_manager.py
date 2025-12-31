@@ -165,71 +165,27 @@ class SearchManager:
             os.remove(file_path)
             logger.info(f"🗑️ Fichier supprimé : {file_path.name}")
 
+    @staticmethod
+    def get_oldest_active_search() -> dict | None:
+        """
+        Retourne la recherche active qui a été mise à jour il y a le plus longtemps.
+        Priorité aux recherches jamais lancées (last_run_at is None).
+        """
+        searches = SearchManager.list_searches(only_active=True)
+        if not searches:
+            return None
 
-def main() -> None:
-    print("==== Starter Searches ====")
-    # # --- Peugeot 106 Rallye (Phase 1 & 2) ---
-    # # Phase 1: 1993-1996 (1.3) / Phase 2: 1996-1998 (1.6)
-    # RALLYE_106 = SearchManager.build_params(
-    #     "106 rallye", min_year="1993", max_year="1999")
-    # SearchManager.create_search(
-    #     name="Peugeot 106 Rallye",
-    #     lbc_params=RALLYE_106,
-    #     whitelist=["rallye", "1.3", "1.6", "phase 1", "phase 2"],
-    #     blacklist=[
-    #         "s16", "xsi", "sport", "enfant", "quiksilver", "kid", "xn", "xr", "xt",
-    #         "diesel", "1.5d", "1.4", "jante", "piece", "recherche", "demande",
-    #         "accident", "export", "carte grise", "vends pieces"
-    #     ]
-    # )
+        # On trie : d'abord ceux qui ont None (jamais lancés), puis par date croissante (le plus vieux d'abord)
+        # La clé de tri renvoie un tuple (A, B) :
+        # A = 0 si last_run est None (prioritaire), 1 sinon.
+        # B = la date elle-même (ou min date si None pour ne pas planter)
 
-    # # --- Mazda MX-5 NA (Mk1) ---
-    # # Production 1989-1997
-    # MX5_NA = SearchManager.build_params(
-    #     "mx5", min_year="1989", max_year="1998")
-    # SearchManager.create_search(
-    #     name="Mazda MX-5 NA (Mk1)",
-    #     lbc_params=MX5_NA,
-    #     whitelist=["na", "mk1", "miata", "eunos",
-    #                "115", "90", "130", "pop up"],
-    #     blacklist=[
-    #         "nb", "mk2", "nc", "mk3", "nd", "mk4", "nbfl", "140", "145", "1.8 vvt",
-    #         "hardtop", "jante", "piece", "recherche", "demande", "location",
-    #         "accident", "export", "catalyseur"
-    #     ]
-    # )
+        def sort_key(s):
+            last_run = s.get("last_run_at")
+            if last_run is None:
+                return (0, "")
+            return (1, last_run)
 
-    # # --- Mazda MX-5 NB (Mk2 & NBFL) ---
-    # # Production 1998-2005
-    # MX5_NB = SearchManager.build_params(
-    #     "mx5", min_year="1998", max_year="2005")
-    # SearchManager.create_search(
-    #     name="Mazda MX-5 NB (Mk2)",
-    #     lbc_params=MX5_NB,
-    #     whitelist=["nb", "mk2", "nbfl", "1.6", "1.8",
-    #                "140", "145", "10th", "eterna", "phoenix"],
-    #     blacklist=[
-    #         "na", "mk1", "nc", "mk3", "nd", "mk4", "pop up", "miata",
-    #         "hardtop", "jante", "piece", "recherche", "demande", "location",
-    #         "accident", "export"
-    #     ]
-    # )
+        searches.sort(key=sort_key)
 
-    # # --- Ford Focus RS MK2 ---
-    # # Production 2009-2011 (Le 5 cylindres 2.5L)
-    # FOCUS_RS_MK2 = SearchManager.build_params(
-    #     "focus rs", min_year="2009", max_year="2011")
-    # SearchManager.create_search(
-    #     name="Ford Focus RS MK2",
-    #     lbc_params=FOCUS_RS_MK2,
-    #     whitelist=["mk2", "305", "2.5", "500", "5 cylindres"],
-    #     blacklist=[
-    #         "mk1", "mk3", "st", "st225", "diesel", "tdci", "titanium", "ghia", "trend",
-    #         "ecoboost", "2.3", "2.0", "1.6", "look rs", "kit rs", "replica", "pack rs",
-    #         "jante", "piece", "recherche", "demande", "accident", "export", "ligne"
-    #     ]
-    # )
-
-
-if __name__ == "__main__":
-    main()
+        return searches[0] if searches else None

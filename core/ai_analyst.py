@@ -4,7 +4,7 @@ import logging
 from typing import Any, Optional
 import google.generativeai as genai
 from dotenv import load_dotenv
-from .scoring_config import SCORING_CONFIG
+from .config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +54,7 @@ class AIAnalyst:
         )
 
     def analyze_ad(self, ad_data: dict) -> Optional[dict]:
-        """
-        Retourne un dict {ai_analysis, scores} ou None si erreur non récupérable.
-        """
+        """Retourne un dict {ai_analysis, scores} ou None si erreur non récupérable."""
         description = ad_data.get("description") or ad_data.get("raw_attributes", {}).get(
             "description_text", "Pas de description"
         )
@@ -79,7 +77,6 @@ Note Vendeur : {ad_data.get('seller_rating', 'N/A')} (sur 1.0) - {ad_data.get('s
 
 --- TA MISSION ---
 - IMPORTANT : Les champs "severity" doivent être compris entre 0.0 et 1.0, et refléter la gravité réelle.
-
 - IMPORTANT: Pour "risques_meca[].severity" (0.0 à 1.0), utilise cette grille:
   * 0.05-0.15: mineur / entretien courant (petite fuite, pneus à prévoir, consommable)
   * 0.20-0.40: défaut notable mais généralement gérable (freins, suspension fatiguée, capteur, petite fuite)
@@ -140,8 +137,8 @@ RÉPONDS UNIQUEMENT EN JSON STRICT :
     @staticmethod
     def _safe_json_loads(text: str) -> dict:
         """
-        Tente de parser du JSON strict. Si l’IA entoure de ```json ... ```,
-        on nettoie proprement.
+        Tente de parser du JSON strict.
+        Si l’IA entoure de ```json ... ```, on nettoie proprement.
         """
         cleaned = text.strip()
 
@@ -165,9 +162,15 @@ RÉPONDS UNIQUEMENT EN JSON STRICT :
                 "Schéma invalide: 'ai_analysis' n’est pas un objet.")
 
     def _calculate_score(self, gemini_data: dict, ad_data: dict) -> dict:
+        # --- CHARGEMENT DYNAMIQUE VIA CONFIG MANAGER ---
+        config = ConfigManager.get_config()
+
         analysis = gemini_data.get("ai_analysis", {})
-        conf_cfg = SCORING_CONFIG["confiance"]
-        base_scores = SCORING_CONFIG["base_scores"]
+
+        # On récupère les sections depuis la config chargée
+        conf_cfg = config["confiance"]
+        base_scores = config["base_scores"]
+        sev_cfg = config.get("severity", {})  # Paramètres de calcul des K
 
         def safe_float(val):
             try:
@@ -188,6 +191,7 @@ RÉPONDS UNIQUEMENT EN JSON STRICT :
             return max(lo, min(hi, x))
 
         def aggregate_k(items: list[dict], cfg: dict) -> float:
+            # Récupération des seuils depuis la config dynamique
             alpha = float(cfg.get("alpha", 0.7))
             sum_cap = float(cfg.get("sum_cap", 0.6))
             hard_threshold = cfg.get("hard_threshold", None)
@@ -204,15 +208,14 @@ RÉPONDS UNIQUEMENT EN JSON STRICT :
 
             penalty = (alpha * s_max) + ((1.0 - alpha) * s_sum)
             k = 1.0 - penalty
+
             k_min = k_min_soft
             if hard_threshold is not None and s_max >= float(hard_threshold):
                 k_min = k_min_hard
 
             return clamp(k, k_min, 1.0)
-            return clamp(k, k_min, 1.0)
-        # --- B. CALCUL FIABILITÉ (K) ---
-        sev_cfg = SCORING_CONFIG.get("severity", {})
 
+        # --- B. CALCUL FIABILITÉ (K) ---
         k_meca = aggregate_k(analysis.get(
             "risques_meca", []), sev_cfg.get("meca", {}))
         k_modif = aggregate_k(analysis.get(
@@ -264,7 +267,7 @@ RÉPONDS UNIQUEMENT EN JSON STRICT :
         s_prod = max(0, min(100, s_prod))
 
         # --- F. SCORE FINAL ---
-        weights = SCORING_CONFIG["weights"]
+        weights = config["weights"]
         score_base = (s_deal * weights["deal"]) + (s_conf *
                                                    weights["conf"]) + (s_prod * weights["prod"])
 

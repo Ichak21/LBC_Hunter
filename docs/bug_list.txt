@@ -1,0 +1,42 @@
+-> clique graphique details Searches --> detaisl annonce ko ! 
+
+-> detaisl annonce : Amelioration visibilité estimation eco --> rouge/verte pour gain perte
+-> detaisl annonce : Pas besoin de prix virtuel plus mettre prix annonce / reparation estimé /cote marché --> gain/perte
+-> detaisl annonce : details des chiffrage des reparation estimé dans estimation eco 
+
+📋 Rapport de Tests et Correctifs
+🧪 TEST 1 : Configuration Dynamique Statut : Fonctionnel, mais nécessite des ajustements pour être conforme aux exigences.
+
+Settings Manager (Centralisation) : De nombreux paramètres utilisés dans le code sont manquants (ex: tempo, paramètres d'agrégation pour les coefficients K, seuils/thresholds, etc.).
+
+Action requise : Centraliser tous les paramètres ici et les organiser par sections (ex: une section "Danger Zone").
+
+Settings Manager (Intégrité des données) : Il manque une validation sur les poids de scoring.
+
+Action requise : La somme des 3 paramètres de pondération (scoring deal) doit être impérativement égale à 1. Si ce n'est pas le cas, la sauvegarde/validation doit être bloquée.
+
+🧪 TEST 2 : Scan Manuel Ciblé Statut : Fonctionnel, mais des informations sont manquantes dans l'interface.
+
+Gestion des recherches (Tuiles) : Il manque des métadonnées essentielles sur l'affichage des tuiles :
+
+Date de la dernière exécution (Last run).
+
+Listes des mots-clés inclus et exclus (White/Black lists).
+
+Nombre d'annonces actives.
+
+🧪 TEST 3 : Intelligence Artificielle & Scoring
+
+✅ Validé (Fonctionnement conforme).
+
+🧪 TEST 4 : Automatisation (Scheduler)
+
+✅ Validé (Fonctionnement conforme).
+
+### 🛡️ PHASE 4 : Robustesse & Nettoyage
+
+- **4.1. Circuit Breaker Scraper :** Si erreur 403, arrêt d'urgence du script pour 30min.
+- **4.2. Clean Code :** Suppression du code mort (Phase de confirmation).
+
+
+-> Préparé un new prompt pour clean ce qui reste 
